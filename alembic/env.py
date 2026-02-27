@@ -13,6 +13,14 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+_EXCLUDED_AUTOGEN_TABLES = {"spatial_ref_sys", "topology", "layer"}
+
+
+def include_object(object_, name, type_, reflected, compare_to):
+    """Skip PostGIS/system tables during autogenerate diff."""
+    if type_ == "table" and name in _EXCLUDED_AUTOGEN_TABLES:
+        return False
+    return True
 
 
 def get_url() -> str:
@@ -25,6 +33,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        include_object=include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -33,7 +42,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection):
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_object=include_object,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

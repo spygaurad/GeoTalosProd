@@ -5,8 +5,8 @@ from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 
 # Import Base first, then all models to fully populate Base.metadata
-from app.db.base import Base  # noqa: F401
-import app.db._all_models  # noqa: F401
+from app.db.base import Base 
+import app.db._all_models
 
 config = context.config
 if config.config_file_name is not None:

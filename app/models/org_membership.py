@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
@@ -15,7 +15,6 @@ class OrgMembership(Base):
             "role IN ('org:admin','org:member','org:viewer')",
             name="chk_org_memberships_role",
         ),
-        # Added to represent invitation/member lifecycle state explicitly.
         CheckConstraint(
             "status IN ('active','invited','suspended')",
             name="chk_org_memberships_status",
@@ -31,20 +30,30 @@ class OrgMembership(Base):
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), primary_key=True
     )
     role: Mapped[str] = mapped_column(String(50), nullable=False, server_default="org:viewer")
-    # Added to track who initiated the org invitation/membership assignment.
     invited_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
-    # Added to support invite -> active -> suspended transitions cleanly.
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
-    # Added for audit trail of membership creation timing.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     synced_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # Added to track role/status lifecycle changes over time.
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    organization: Mapped["Organization"] = relationship(
+        "Organization",
+        back_populates="memberships",
+    )
+    user: Mapped["User"] = relationship(
+        "User",
+        back_populates="org_memberships",
+        foreign_keys=[user_id],
+    )
+    inviter: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[invited_by],
     )

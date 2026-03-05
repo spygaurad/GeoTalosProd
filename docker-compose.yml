@@ -1,0 +1,571 @@
+# =============================================================================
+# AwakeForest Geospatial Platform — Docker Compose
+# =============================================================================
+#
+# SERVICES
+# ────────
+#  Databases  : app-db  (PostgreSQL 15 + PostGIS 3.3)
+#               stac-db (pgSTAC v0.9.6)
+#  STAC layer : stac-api (stac-fastapi-pgstac 5.0.2)
+#               titiler  (titiler-pgstac 1.7.2)
+#  Broker     : redis    (Redis 7.2)
+#  Storage    : minio    (S3-compatible)
+#               minio-setup (one-shot bucket initialisation)
+#  App        : api      (FastAPI — hot-reload in dev)
+#  Workers    : celery-worker-ingestion
+#               celery-worker-bulk
+#               celery-worker-analysis  (also handles discovery queue)
+#               celery-worker-inference
+#               celery-worker-default
+#               celery-beat             (scheduled tasks)
+#               flower                  (Celery monitoring UI → :5555)
+#
+# NETWORKS
+# ────────
+#  awakeforest-backend  — app-db · redis · api · all workers · beat · flower
+#  awakeforest-stac     — stac-db · stac-api · titiler · api · ingestion worker
+#  awakeforest-storage  — minio · titiler · api · ingestion/bulk/inference workers
+#
+# QUICK START
+# ───────────
+#  cp .env.docker .env          # fill in secrets
+#  docker compose up -d
+#  docker compose logs -f api   # tail a single service
+#
+# =============================================================================
+
+# ── Shared build context for all app services ─────────────────────────────────
+x-app-build: &app-build
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+
+# ── Shared environment for all app services ───────────────────────────────────
+x-app-env: &app-env
+  # Application DB (asyncpg — RLS enforced via app_user)
+  APP_DATABASE_URL: postgresql+asyncpg://app_user:${APP_USER_PASSWORD:-app_pass}@app-db:5432/geoplat
+  # STAC Catalog DB — write path
+  STAC_DATABASE_URL: postgresql+asyncpg://pgstac_ingest:${STAC_INGEST_PASSWORD:-ingest_pass}@stac-db:5432/pgstac
+  # STAC Catalog DB — read-only pool
+  STAC_READ_URL: postgresql+asyncpg://pgstac_read:${STAC_READ_PASSWORD:-read_pass}@stac-db:5432/pgstac
+  # Celery worker DB (psycopg2 sync — BYPASSRLS role)
+  CELERY_DATABASE_URL: postgresql+psycopg2://celery_worker:${CELERY_WORKER_PASSWORD:-celery_pass}@app-db:5432/geoplat
+  # Broker / result backend
+  REDIS_URL: redis://:${REDIS_PASSWORD:-redis_pass}@redis:6379/0
+  # Internal service URLs
+  STAC_API_URL: http://stac-api:8080
+  TITILER_URL: http://titiler:8000
+  # MinIO (S3-compatible) — path-style access for local use
+  AWS_ENDPOINT_URL: http://minio:9000
+  AWS_REGION: ${AWS_REGION:-us-east-1}
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
+  AWS_S3_FORCE_PATH_STYLE: "true"
+  S3_BUCKET_PREFIX: ${S3_BUCKET_PREFIX:-org-}
+  # Auth
+  CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+  CLERK_WEBHOOK_SECRET: ${CLERK_WEBHOOK_SECRET:-}
+  # Security
+  API_KEY_SALT: ${API_KEY_SALT:-changeme_32_byte_hex_string_here}
+  # Runtime
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+
+  # ============================================================================
+  # DATABASES
+  # ============================================================================
+
+  app-db:
+    image: postgis/postgis:15-3.3
+    container_name: awakeforest-app-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: geoplat
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${APP_DB_SUPERUSER_PASSWORD:-postgres}
+      # Passed through to the init script so it can set role passwords
+      APP_USER_PASSWORD: ${APP_USER_PASSWORD:-app_pass}
+      CELERY_WORKER_PASSWORD: ${CELERY_WORKER_PASSWORD:-celery_pass}
+    volumes:
+      - app-db-data:/var/lib/postgresql/data
+      - ./infra/docker/app-db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${APP_DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d geoplat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - awakeforest-backend
+    labels:
+      com.awakeforest.service: app-db
+      com.awakeforest.role: database
+
+  stac-db:
+    # pgSTAC v0.9.6 — PostgreSQL 15 + PostGIS + pgSTAC schema pre-installed
+    # Source: ghcr.io/stac-utils/pgstac  (mirrors eoAPI reference setup)
+    image: ghcr.io/stac-utils/pgstac:v0.9.6
+    container_name: awakeforest-stac-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pgstac
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${STAC_DB_SUPERUSER_PASSWORD:-pgstac_admin}
+      PGUSER: postgres
+      PGPASSWORD: ${STAC_DB_SUPERUSER_PASSWORD:-pgstac_admin}
+      PGDATABASE: pgstac
+      # Passed through to init script for role creation
+      STAC_INGEST_PASSWORD: ${STAC_INGEST_PASSWORD:-ingest_pass}
+      STAC_READ_PASSWORD: ${STAC_READ_PASSWORD:-read_pass}
+    volumes:
+      - stac-db-data:/var/lib/postgresql/data
+      - ./infra/docker/stac-db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${STAC_DB_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pgstac"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - awakeforest-stac
+    labels:
+      com.awakeforest.service: stac-db
+      com.awakeforest.role: database
+
+  # ============================================================================
+  # STAC LAYER
+  # ============================================================================
+
+  stac-api:
+    # stac-fastapi-pgstac 5.0.2 — matches eoAPI reference
+    image: ghcr.io/stac-utils/stac-fastapi-pgstac:5.0.2
+    container_name: awakeforest-stac-api
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pgstac_ingest
+      POSTGRES_PASS: ${STAC_INGEST_PASSWORD:-ingest_pass}
+      POSTGRES_DBNAME: pgstac
+      POSTGRES_HOST_READER: stac-db
+      POSTGRES_HOST_WRITER: stac-db
+      POSTGRES_PORT: 5432
+      DB_MIN_CONN_SIZE: 1
+      DB_MAX_CONN_SIZE: 10
+      USE_API_HYDRATE: "false"
+      ENABLE_DIRECT_RESPONSE: "true"
+      WEB_CONCURRENCY: 2
+    ports:
+      - "${STAC_API_PORT:-8081}:8080"
+    depends_on:
+      stac-db:
+        condition: service_healthy
+    networks:
+      - awakeforest-stac
+    labels:
+      com.awakeforest.service: stac-api
+      com.awakeforest.role: stac
+
+  titiler:
+    # titiler-pgstac 1.7.2 — matches eoAPI reference
+    # Forced to linux/amd64 for GDAL native lib compatibility on ARM hosts
+    image: ghcr.io/stac-utils/titiler-pgstac:1.7.2
+    platform: linux/amd64
+    container_name: awakeforest-titiler
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pgstac_read
+      POSTGRES_PASS: ${STAC_READ_PASSWORD:-read_pass}
+      POSTGRES_DBNAME: pgstac
+      POSTGRES_HOST: stac-db
+      POSTGRES_PORT: 5432
+      DB_MIN_CONN_SIZE: 1
+      DB_MAX_CONN_SIZE: 5
+      MOSAIC_CONCURRENCY: 4
+      # GDAL performance tuning
+      CPL_TMPDIR: /tmp
+      GDAL_CACHEMAX: 512
+      GDAL_INGESTED_BYTES_AT_OPEN: 32768
+      GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
+      GDAL_HTTP_MERGE_CONSECUTIVE_RANGES: "YES"
+      GDAL_HTTP_MULTIPLEX: "YES"
+      GDAL_HTTP_VERSION: "2"
+      VSI_CACHE: "TRUE"
+      VSI_CACHE_SIZE: "536870912"   # 512 MB
+      CPL_VSIL_CURL_CACHE_SIZE: "200000000"
+      # MinIO/S3 access for reading original files
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_S3_FORCE_PATH_STYLE: "true"
+    ports:
+      - "${TITILER_PORT:-8082}:8000"
+    depends_on:
+      stac-db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - awakeforest-stac
+      - awakeforest-storage
+    labels:
+      com.awakeforest.service: titiler
+      com.awakeforest.role: tile-server
+
+  # ============================================================================
+  # CACHE / MESSAGE BROKER
+  # ============================================================================
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: awakeforest-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory ${REDIS_MAXMEM:-512mb}
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD:-redis_pass}
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_pass}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - awakeforest-backend
+    labels:
+      com.awakeforest.service: redis
+      com.awakeforest.role: broker
+
+  # ============================================================================
+  # OBJECT STORAGE  (MinIO — S3-compatible)
+  # ============================================================================
+
+  minio:
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    container_name: awakeforest-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
+      MINIO_REGION: ${AWS_REGION:-us-east-1}
+      # Enable path-style so boto3 with custom endpoint works without DNS tricks
+      MINIO_DOMAIN: minio
+    volumes:
+      - minio-data:/data
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"     # S3 API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001" # Web console
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - awakeforest-storage
+    labels:
+      com.awakeforest.service: minio
+      com.awakeforest.role: storage
+
+  # One-shot container: creates the shared exports bucket.
+  # Per-org buckets (org-{org_id}) are created at runtime by the application.
+  minio-setup:
+    image: minio/mc:RELEASE.2024-11-21T17-21-54Z
+    container_name: awakeforest-minio-setup
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD;
+        mc mb --ignore-existing local/awakeforest-exports;
+        mc mb --ignore-existing local/awakeforest-jobs;
+        echo '✓ MinIO buckets ready.';
+        exit 0;
+      "
+    networks:
+      - awakeforest-storage
+    labels:
+      com.awakeforest.service: minio-setup
+      com.awakeforest.role: init
+
+  # ============================================================================
+  # APPLICATION — FastAPI
+  # ============================================================================
+
+  api:
+    <<: *app-build
+    container_name: awakeforest-api
+    environment:
+      <<: *app-env
+    # --reload watches for source changes; remove in staging/production
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - .:/app  # mount source for hot-reload in development
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      app-db:
+        condition: service_healthy
+      stac-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - awakeforest-backend
+      - awakeforest-stac
+      - awakeforest-storage
+    labels:
+      com.awakeforest.service: api
+      com.awakeforest.role: application
+
+  # ============================================================================
+  # CELERY WORKERS
+  # Each worker is pinned to one or two logically related queues so that
+  # queue-specific concurrency and autoscaling can be tuned independently.
+  # ============================================================================
+
+  celery-worker-ingestion:
+    # Queues: ingestion, discovery
+    # Handles: dataset ingest (rasterio/pgSTAC writes) + relationship discovery
+    <<: *app-build
+    container_name: awakeforest-worker-ingestion
+    environment:
+      <<: *app-env
+    command: >
+      celery -A app.workers.celery_app worker
+      --loglevel=${LOG_LEVEL:-INFO}
+      --queues=ingestion,discovery
+      --concurrency=4
+      --hostname=ingestion@%h
+    depends_on:
+      app-db:
+        condition: service_healthy
+      stac-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - awakeforest-backend
+      - awakeforest-stac
+      - awakeforest-storage
+    labels:
+      com.awakeforest.service: celery-worker-ingestion
+      com.awakeforest.role: worker
+
+  celery-worker-bulk:
+    # Queues: bulk
+    # Handles: bulk annotation import / update / delete / export
+    <<: *app-build
+    container_name: awakeforest-worker-bulk
+    environment:
+      <<: *app-env
+    command: >
+      celery -A app.workers.celery_app worker
+      --loglevel=${LOG_LEVEL:-INFO}
+      --queues=bulk
+      --concurrency=4
+      --hostname=bulk@%h
+    depends_on:
+      app-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - awakeforest-backend
+      - awakeforest-storage
+    labels:
+      com.awakeforest.service: celery-worker-bulk
+      com.awakeforest.role: worker
+
+  celery-worker-analysis:
+    # Queues: analysis
+    # Handles: timeseries, change detection, annotation stats refresh
+    <<: *app-build
+    container_name: awakeforest-worker-analysis
+    environment:
+      <<: *app-env
+    command: >
+      celery -A app.workers.celery_app worker
+      --loglevel=${LOG_LEVEL:-INFO}
+      --queues=analysis
+      --concurrency=4
+      --hostname=analysis@%h
+    depends_on:
+      app-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - awakeforest-backend
+    labels:
+      com.awakeforest.service: celery-worker-analysis
+      com.awakeforest.role: worker
+
+  celery-worker-inference:
+    # Queues: inference
+    # Handles: ML model inference, writes results back to S3 + annotations
+    # Add 'deploy.resources.reservations.devices' here for GPU access
+    <<: *app-build
+    container_name: awakeforest-worker-inference
+    environment:
+      <<: *app-env
+    command: >
+      celery -A app.workers.celery_app worker
+      --loglevel=${LOG_LEVEL:-INFO}
+      --queues=inference
+      --concurrency=2
+      --hostname=inference@%h
+    depends_on:
+      app-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - awakeforest-backend
+      - awakeforest-storage
+    labels:
+      com.awakeforest.service: celery-worker-inference
+      com.awakeforest.role: worker
+
+  celery-worker-default:
+    # Queues: default
+    # Handles: notifications, cache refresh, cleanup, alert dispatch
+    <<: *app-build
+    container_name: awakeforest-worker-default
+    environment:
+      <<: *app-env
+    command: >
+      celery -A app.workers.celery_app worker
+      --loglevel=${LOG_LEVEL:-INFO}
+      --queues=default
+      --concurrency=2
+      --hostname=default@%h
+    depends_on:
+      app-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - awakeforest-backend
+    labels:
+      com.awakeforest.service: celery-worker-default
+      com.awakeforest.role: worker
+
+  celery-beat:
+    # Periodic task scheduler — runs annotation_statistics refresh and other
+    # beat tasks defined in app/workers/celery_app.py beat_schedule.
+    # Only ever run ONE instance of this service.
+    <<: *app-build
+    container_name: awakeforest-celery-beat
+    environment:
+      <<: *app-env
+    command: >
+      celery -A app.workers.celery_app beat
+      --loglevel=${LOG_LEVEL:-INFO}
+      --schedule=/tmp/celerybeat-schedule
+    volumes:
+      - celerybeat-schedule:/tmp  # persist schedule file across restarts
+    depends_on:
+      app-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - awakeforest-backend
+    labels:
+      com.awakeforest.service: celery-beat
+      com.awakeforest.role: scheduler
+
+  # ============================================================================
+  # MONITORING
+  # ============================================================================
+
+  flower:
+    # Celery task monitoring — http://localhost:5555
+    <<: *app-build
+    container_name: awakeforest-flower
+    environment:
+      <<: *app-env
+      FLOWER_BASIC_AUTH: ${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-flower_pass}
+    command: >
+      celery -A app.workers.celery_app flower
+      --port=5555
+      --broker_api=redis://:${REDIS_PASSWORD:-redis_pass}@redis:6379/0
+    ports:
+      - "${FLOWER_PORT:-5555}:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - awakeforest-backend
+    labels:
+      com.awakeforest.service: flower
+      com.awakeforest.role: monitoring
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+
+volumes:
+  app-db-data:
+    name: awakeforest-app-db-data
+  stac-db-data:
+    name: awakeforest-stac-db-data
+  redis-data:
+    name: awakeforest-redis-data
+  minio-data:
+    name: awakeforest-minio-data
+  celerybeat-schedule:
+    name: awakeforest-celerybeat-schedule
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+#
+#  awakeforest-backend  — primary app plane
+#    app-db · redis · api · all workers · beat · flower
+#
+#  awakeforest-stac     — STAC catalog plane
+#    stac-db · stac-api · titiler · api · ingestion worker
+#
+#  awakeforest-storage  — object storage plane
+#    minio · minio-setup · titiler · api
+#    ingestion worker (writes STAC + VRT) · bulk worker (exports)
+#    inference worker (reads rasters, writes results)
+#
+# Services join only the networks they actually need, so e.g. the analysis
+# worker has no route to minio and the stac-api has no route to redis.
+# =============================================================================
+
+networks:
+  awakeforest-backend:
+    name: awakeforest-backend
+    driver: bridge
+
+  awakeforest-stac:
+    name: awakeforest-stac
+    driver: bridge
+
+  awakeforest-storage:
+    name: awakeforest-storage
+    driver: bridge

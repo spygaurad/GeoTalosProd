@@ -1,0 +1,59 @@
+[tool.poetry]
+name = "awakeforest"
+version = "0.1.0"
+description = "AwakeForest Geospatial Platform"
+authors = ["AwakeForest Team"]
+packages = [{ include = "app" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.115"
+uvicorn = { extras = ["standard"], version = "^0.32" }
+
+# Database
+sqlalchemy = { extras = ["asyncio"], version = "^2.0" }
+asyncpg = "^0.30"
+psycopg2-binary = "^2.9"
+alembic = "^1.14"
+geoalchemy2 = "^0.15"
+
+# Validation
+pydantic = "^2.9"
+pydantic-settings = "^2.6"
+
+# Task queue
+celery = { extras = ["redis"], version = "^5.4" }
+redis = "^5.2"
+flower = "^2.0"
+
+# AWS
+boto3 = "^1.35"
+
+# Geospatial
+rasterio = "^1.4"
+shapely = "^2.0"
+
+# HTTP client (STAC proxy, alert webhooks)
+httpx = "^0.28"
+
+# Auth
+svix = "^1.37"
+python-jose = { extras = ["cryptography"], version = "^3.3" }
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+pytest-asyncio = "^0.24"
+pytest-cov = "^6.0"
+factory-boy = "^3.3"
+moto = { extras = ["s3"], version = "^5.0" }
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

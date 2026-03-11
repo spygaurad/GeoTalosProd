@@ -17,12 +17,28 @@ class OrganizationService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
 
-    async def list_organizations(self, limit: int, offset: int) -> tuple[Sequence[Organization], int]:
-        rows = await self.db.scalars(
-            select(Organization).order_by(Organization.created_at.desc()).limit(limit).offset(offset)
+    async def list_organizations(
+        self,
+        limit: int,
+        offset: int,
+        organization_id: UUID | None = None,
+    ) -> tuple[Sequence[Organization], int]:
+        query = select(Organization)
+        count_query = select(func.count()).select_from(Organization)
+
+        if organization_id is not None:
+            query = query.where(Organization.id == organization_id)
+            count_query = count_query.where(Organization.id == organization_id)
+
+        rows = await self.db.scalars(query.order_by(Organization.created_at.desc()).limit(limit).offset(offset))
+        total = await self.db.scalar(count_query)
+        logger.debug(
+            "list_organizations organization_id=%s limit=%s offset=%s total=%s",
+            organization_id,
+            limit,
+            offset,
+            total or 0,
         )
-        total = await self.db.scalar(select(func.count()).select_from(Organization))
-        logger.debug("list_organizations limit=%s offset=%s total=%s", limit, offset, total or 0)
         return rows.all(), int(total or 0)
 
     async def get_organization(self, organization_id: UUID) -> Organization:

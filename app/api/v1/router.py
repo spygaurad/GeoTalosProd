@@ -1,12 +1,15 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    annotations,
     auth,
+    datasets,
     health,
     org_memberships,
     organizations,
     project_members,
     projects,
+    models,
     users,
     webhooks,
 )
@@ -20,3 +23,6 @@ api_router.include_router(users.router)
 api_router.include_router(org_memberships.router)
 api_router.include_router(projects.router)
 api_router.include_router(project_members.router)
+api_router.include_router(datasets.router)
+api_router.include_router(annotations.router)
+api_router.include_router(models.router)

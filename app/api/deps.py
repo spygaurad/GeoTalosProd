@@ -79,3 +79,20 @@ def require_role(min_role: str):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     return Depends(_check)
+
+
+def require_org_role(min_role: str):
+    """Dependency factory — enforces org context + role and returns org_id."""
+
+    async def _check(
+        request: Request,
+        org_id: uuid.UUID | None = Depends(get_current_org_id),
+    ) -> uuid.UUID:
+        if org_id is None:
+            raise HTTPException(status_code=403, detail="Organization context required")
+        role = request.state.clerk_claims.get("org_role", "org:viewer")
+        if _ROLE_RANK.get(role, 0) < _ROLE_RANK.get(min_role, 0):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return org_id
+
+    return Depends(_check)

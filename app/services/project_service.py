@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import conflict, not_found
 from app.models.project import Project
+from app.models.project_member import ProjectMember
 from app.schemas.project import ProjectCreate, ProjectUpdate
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ class ProjectService:
         limit: int,
         offset: int,
         organization_id: UUID | None = None,
+        user_id: UUID | None = None,
     ) -> tuple[Sequence[Project], int]:
         query = select(Project)
         count_query = select(func.count()).select_from(Project)
@@ -30,22 +32,38 @@ class ProjectService:
         if organization_id is not None:
             query = query.where(Project.organization_id == organization_id)
             count_query = count_query.where(Project.organization_id == organization_id)
+        if user_id is not None:
+            query = query.join(ProjectMember, ProjectMember.project_id == Project.id).where(
+                ProjectMember.user_id == user_id
+            )
+            count_query = count_query.join(ProjectMember, ProjectMember.project_id == Project.id).where(
+                ProjectMember.user_id == user_id
+            )
 
         rows = await self.db.scalars(
             query.order_by(Project.created_at.desc()).limit(limit).offset(offset)
         )
         total = await self.db.scalar(count_query)
         logger.debug(
-            "list_projects organization_id=%s limit=%s offset=%s total=%s",
+            "list_projects organization_id=%s user_id=%s limit=%s offset=%s total=%s",
             organization_id,
+            user_id,
             limit,
             offset,
             total or 0,
         )
         return rows.all(), int(total or 0)
 
-    async def get_project(self, project_id: UUID) -> Project:
-        project = await self.db.get(Project, project_id)
+    async def get_project(self, project_id: UUID, organization_id: UUID | None = None) -> Project:
+        if organization_id is None:
+            project = await self.db.get(Project, project_id)
+        else:
+            result = await self.db.execute(
+                select(Project).where(
+                    Project.id == project_id, Project.organization_id == organization_id
+                )
+            )
+            project = result.scalar_one_or_none()
         if project is None:
             logger.warning("get_project_not_found project_id=%s", project_id)
             raise not_found("Project")
@@ -70,8 +88,10 @@ class ProjectService:
         logger.info("create_project_success project_id=%s", project.id)
         return project
 
-    async def update_project(self, project_id: UUID, payload: ProjectUpdate) -> Project:
-        project = await self.get_project(project_id)
+    async def update_project(
+        self, project_id: UUID, payload: ProjectUpdate, organization_id: UUID | None = None
+    ) -> Project:
+        project = await self.get_project(project_id, organization_id=organization_id)
         data = payload.model_dump(exclude_unset=True)
 
         if "metadata" in data:
@@ -93,8 +113,8 @@ class ProjectService:
         logger.info("update_project_success project_id=%s", project.id)
         return project
 
-    async def delete_project(self, project_id: UUID) -> None:
-        project = await self.get_project(project_id)
+    async def delete_project(self, project_id: UUID, organization_id: UUID | None = None) -> None:
+        project = await self.get_project(project_id, organization_id=organization_id)
         await self.db.delete(project)
         await self.db.commit()
         logger.info("delete_project_success project_id=%s", project_id)

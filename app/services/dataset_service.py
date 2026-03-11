@@ -71,6 +71,7 @@ class DatasetService:
 
     async def create_dataset(self, payload: DatasetCreate) -> Dataset:
         data = payload.model_dump()
+        data["metadata_"] = data.pop("metadata")
         if data.get("spatial_extent") is not None:
             data["spatial_extent"] = parse_geometry(data["spatial_extent"])
         dataset = Dataset(**data)
@@ -93,6 +94,8 @@ class DatasetService:
 
         if "spatial_extent" in data:
             data["spatial_extent"] = parse_geometry(data["spatial_extent"])
+        if "metadata" in data:
+            data["metadata_"] = data.pop("metadata")
         if data.get("tags") is None and "tags" in data:
             data["tags"] = []
 

@@ -1,9 +1,9 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_session, require_org_role
+from app.api.deps import get_current_role, get_current_user, get_session, require_org_role
 from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
 from app.models.user import User
@@ -21,13 +21,10 @@ async def list_projects(
     org_id: UUID = Depends(require_org_role("org:viewer")),
     db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
-    request: Request = None,
+    role: str = Depends(get_current_role),
 ):
     if organization_id is not None and organization_id != org_id:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    role = "org:viewer"
-    if request is not None:
-        role = request.state.clerk_claims.get("org_role", "org:viewer")
     service = ProjectService(db)
     user_filter = None if role == "org:admin" else current_user.id
     items, total = await service.list_projects(

@@ -70,6 +70,10 @@ async def get_current_org_id(
 _ROLE_RANK = {"org:viewer": 0, "org:member": 1, "org:admin": 2}
 
 
+async def get_current_role(request: Request) -> str:
+    return request.state.clerk_claims.get("org_role", "org:viewer")
+
+
 def require_role(min_role: str):
     """Dependency factory — raises 403 if the caller's role is below min_role."""
 
@@ -78,7 +82,7 @@ def require_role(min_role: str):
         if _ROLE_RANK.get(role, 0) < _ROLE_RANK.get(min_role, 0):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    return Depends(_check)
+    return _check
 
 
 def require_org_role(min_role: str):
@@ -95,4 +99,4 @@ def require_org_role(min_role: str):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return org_id
 
-    return Depends(_check)
+    return _check

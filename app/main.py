@@ -20,7 +20,10 @@ async def lifespan(app: FastAPI):
     # In development, seed a dev org and user so the hardcoded dev claims in
     # ClerkAuthMiddleware resolve correctly without a real Clerk account.
     if settings.ENVIRONMENT == "development":
-        await _seed_dev_fixtures()
+        try:
+            await _seed_dev_fixtures()
+        except Exception:
+            logger.warning("dev_seed_failed database not ready", exc_info=True)
     yield
 
 

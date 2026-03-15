@@ -13,7 +13,7 @@ import uuid
 from collections.abc import AsyncGenerator
 
 from fastapi import Depends, HTTPException, Request
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,9 +25,8 @@ from app.models.user import User
 async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
     """Open a transactional AsyncSession and set RLS context before yielding."""
     async with AsyncSessionLocal() as session:
-        async with session.begin():
-            await set_rls_context(session, request)
-            yield session
+        await set_rls_context(session, request)
+        yield session
 
 
 async def get_current_user(
@@ -36,23 +35,21 @@ async def get_current_user(
 ) -> User:
     """Upsert the calling user from Clerk JWT claims and return the ORM object."""
     claims = request.state.clerk_claims
-    clerk_user_id: str = claims["sub"]
+    clerk_id: str = claims["sub"]
     email: str = claims.get("email", "")
     name: str = claims.get("name", "")
 
-    # Upsert — idempotent on clerk_user_id.
     await session.execute(
         pg_insert(User.__table__)
-        .values(id=uuid.uuid4(), clerk_user_id=clerk_user_id, email=email, name=name)
+        .values(id=uuid.uuid4(), clerk_id=clerk_id, email=email, name=name)
         .on_conflict_do_update(
-            index_elements=["clerk_user_id"],
+            index_elements=["clerk_id"],
             set_={"email": email, "name": name},
         )
     )
+    await session.commit()
 
-    result = await session.execute(
-        select(User).where(User.clerk_user_id == clerk_user_id)
-    )
+    result = await session.execute(select(User).where(User.clerk_id == clerk_id))
     return result.scalar_one()
 
 
@@ -70,6 +67,10 @@ async def get_current_org_id(
 _ROLE_RANK = {"org:viewer": 0, "org:member": 1, "org:admin": 2}
 
 
+async def get_current_role(request: Request) -> str:
+    return request.state.clerk_claims.get("org_role", "org:viewer")
+
+
 def require_role(min_role: str):
     """Dependency factory — raises 403 if the caller's role is below min_role."""
 
@@ -78,4 +79,21 @@ def require_role(min_role: str):
         if _ROLE_RANK.get(role, 0) < _ROLE_RANK.get(min_role, 0):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    return Depends(_check)
+    return _check
+
+
+def require_org_role(min_role: str):
+    """Dependency factory — enforces org context + role and returns org_id."""
+
+    async def _check(
+        request: Request,
+        org_id: uuid.UUID | None = Depends(get_current_org_id),
+    ) -> uuid.UUID:
+        if org_id is None:
+            raise HTTPException(status_code=403, detail="Organization context required")
+        role = request.state.clerk_claims.get("org_role", "org:viewer")
+        if _ROLE_RANK.get(role, 0) < _ROLE_RANK.get(min_role, 0):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return org_id
+
+    return _check

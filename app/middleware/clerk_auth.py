@@ -13,6 +13,7 @@ real Clerk account. Any valid Bearer token in dev mode is still verified
 normally — the bypass only fires when the Authorization header is absent.
 """
 
+import ipaddress
 import time
 from typing import Any
 
@@ -52,10 +53,15 @@ class ClerkAuthMiddleware(BaseHTTPMiddleware):
 
         auth_header = request.headers.get("Authorization", "")
 
-        # Development bypass — no token present → inject dev claims.
+        # Development bypass — no token present → inject dev claims, but only from local/private IPs.
         if settings.ENVIRONMENT == "development" and not auth_header:
-            request.state.clerk_claims = _DEV_CLAIMS
-            return await call_next(request)
+            if self._is_dev_bypass_allowed(request):
+                request.state.clerk_claims = _DEV_CLAIMS
+                return await call_next(request)
+            return JSONResponse(
+                {"detail": "Dev auth bypass is restricted to local/private networks"},
+                status_code=403,
+            )
 
         if not auth_header.startswith("Bearer "):
             return JSONResponse(
@@ -77,6 +83,19 @@ class ClerkAuthMiddleware(BaseHTTPMiddleware):
 
         request.state.clerk_claims = payload
         return await call_next(request)
+
+    @staticmethod
+    def _is_dev_bypass_allowed(request: Request) -> bool:
+        client_host = request.client.host if request.client else ""
+        if not client_host:
+            return False
+        if client_host in {"localhost"}:
+            return True
+        try:
+            ip = ipaddress.ip_address(client_host)
+        except ValueError:
+            return False
+        return ip.is_loopback or ip.is_private
 
     async def _get_jwks(self) -> dict:
         now = time.monotonic()

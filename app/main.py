@@ -1,11 +1,24 @@
+import logging
+import time
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.config import settings
+from app.core.logging import configure_logging
 from app.middleware.clerk_auth import ClerkAuthMiddleware
+
+configure_logging(settings.LOG_LEVEL)
+logger = logging.getLogger(__name__)
+
+if settings.ENVIRONMENT != "development":
+    if not settings.BACKEND_CORS_ORIGINS or "*" in settings.BACKEND_CORS_ORIGINS:
+        raise RuntimeError(
+            "BACKEND_CORS_ORIGINS must be an explicit allowlist in non-development environments."
+        )
 
 
 @asynccontextmanager
@@ -13,7 +26,10 @@ async def lifespan(app: FastAPI):
     # In development, seed a dev org and user so the hardcoded dev claims in
     # ClerkAuthMiddleware resolve correctly without a real Clerk account.
     if settings.ENVIRONMENT == "development":
-        await _seed_dev_fixtures()
+        try:
+            await _seed_dev_fixtures()
+        except Exception:
+            logger.warning("dev_seed_failed database not ready", exc_info=True)
     yield
 
 
@@ -46,11 +62,11 @@ async def _seed_dev_fixtures() -> None:
                 pg_insert(User.__table__)
                 .values(
                     id=uuid.UUID("00000000-0000-0000-0000-000000000002"),
-                    clerk_user_id=dev_user_clerk_id,
+                    clerk_id=dev_user_clerk_id,
                     email="dev@localhost",
                     name="Dev User",
                 )
-                .on_conflict_do_nothing(index_elements=["clerk_user_id"])
+                .on_conflict_do_nothing(index_elements=["clerk_id"])
             )
 
 
@@ -66,5 +82,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", str(uuid4()))
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "request_failed method=%s path=%s request_id=%s",
+            request.method,
+            request.url.path,
+            request_id,
+        )
+        raise
+    latency_ms = (time.perf_counter() - start) * 1000
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "request method=%s path=%s status_code=%s latency_ms=%.2f request_id=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        latency_ms,
+        request_id,
+    )
+    return response
+
 
 app.include_router(api_router, prefix="/api/v1")

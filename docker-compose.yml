@@ -268,8 +268,8 @@ services:
     volumes:
       - minio-data:/data
     ports:
-      - "${MINIO_API_PORT:-9000}:9000"     # S3 API
-      - "${MINIO_CONSOLE_PORT:-9001}:9001" # Web console
+      - "${MINIO_API_PORT:-9002}:9000"     # S3 API
+      - "${MINIO_CONSOLE_PORT:-9002}:9001" # Web console
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
       interval: 15s

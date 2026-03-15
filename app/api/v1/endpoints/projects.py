@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_role, get_current_user, get_session, require_org_role
+from app.api.deps import get_current_user, get_session, require_org_role
 from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
 from app.models.user import User
@@ -20,18 +20,15 @@ async def list_projects(
     offset: int = Depends(offset_param),
     org_id: UUID = Depends(require_org_role("org:viewer")),
     db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user),
-    role: str = Depends(get_current_role),
+    _current_user: User = Depends(get_current_user),
 ):
     if organization_id is not None and organization_id != org_id:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     service = ProjectService(db)
-    user_filter = None if role == "org:admin" else current_user.id
     items, total = await service.list_projects(
         limit=limit,
         offset=offset,
         organization_id=org_id,
-        user_id=user_filter,
     )
     return ProjectListResponse(items=items, total=total, limit=limit, offset=offset)
 
@@ -58,12 +55,13 @@ async def create_project(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     service = ProjectService(db)
     project = await service.create_project(payload)
-    log_audit_event(
+    await log_audit_event(
         action="projects.create",
         actor_id=str(current_user.id),
         organization_id=str(org_id),
         entity="project",
         entity_id=str(project.id),
+        session=db,
     )
     return project
 
@@ -78,12 +76,13 @@ async def update_project_by_id(
 ):
     service = ProjectService(db)
     project = await service.update_project(project_id, payload, organization_id=org_id)
-    log_audit_event(
+    await log_audit_event(
         action="projects.update",
         actor_id=str(current_user.id),
         organization_id=str(org_id),
         entity="project",
         entity_id=str(project_id),
+        session=db,
     )
     return project
 
@@ -97,10 +96,11 @@ async def delete_project_by_id(
 ):
     service = ProjectService(db)
     await service.delete_project(project_id, organization_id=org_id)
-    log_audit_event(
+    await log_audit_event(
         action="projects.delete",
         actor_id=str(current_user.id),
         organization_id=str(org_id),
         entity="project",
         entity_id=str(project_id),
+        session=db,
     )

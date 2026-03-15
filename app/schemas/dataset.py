@@ -1,78 +1,66 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import Field, field_serializer
+from pydantic import ConfigDict, Field
 
-from app.core.geometry import serialize_geometry
 from app.schemas.common import ORMModel, PaginatedResponse
 
 
 class DatasetCreate(ORMModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     organization_id: UUID
-    project_id: UUID | None = None
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
+    dataset_type: str = Field(min_length=1, max_length=50)
     stac_collection_id: str | None = None
-    source_uri: str = Field(min_length=1)
-    file_format: str | None = None
-    status: str = Field(default="pending", min_length=1, max_length=50)
-    tags: list[str] = Field(default_factory=list)
-    temporal_extent_start: datetime | None = None
-    temporal_extent_end: datetime | None = None
-    spatial_extent: dict | None = None
-    license: str | None = None
-    item_count: int = 0
-    total_size_bytes: int = 0
-    parent_dataset_id: UUID | None = None
+    geometry: dict | None = None
+    temporal_extent: dict | None = None
+    metadata: dict | None = Field(
+        default=None,
+        validation_alias="metadata_",
+        serialization_alias="metadata",
+    )
     created_by: UUID | None = None
-    metadata: dict = Field(default_factory=dict)
 
 
 class DatasetUpdate(ORMModel):
-    project_id: UUID | None = None
+    model_config = ConfigDict(populate_by_name=True)
+
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
+    dataset_type: str | None = Field(default=None, min_length=1, max_length=50)
     stac_collection_id: str | None = None
-    source_uri: str | None = None
-    file_format: str | None = None
-    status: str | None = Field(default=None, min_length=1, max_length=50)
-    tags: list[str] | None = None
-    temporal_extent_start: datetime | None = None
-    temporal_extent_end: datetime | None = None
-    spatial_extent: dict | None = None
-    license: str | None = None
-    item_count: int | None = None
-    total_size_bytes: int | None = None
-    parent_dataset_id: UUID | None = None
-    metadata: dict | None = None
+    geometry: dict | None = None
+    temporal_extent: dict | None = None
+    metadata: dict | None = Field(
+        default=None,
+        validation_alias="metadata_",
+        serialization_alias="metadata",
+    )
+    deleted_at: datetime | None = None
 
 
 class DatasetRead(ORMModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: UUID
     organization_id: UUID
-    project_id: UUID | None
     name: str
     description: str | None
+    dataset_type: str
     stac_collection_id: str | None
-    source_uri: str
-    file_format: str | None
-    status: str
-    tags: list[str] = Field(default_factory=list)
-    temporal_extent_start: datetime | None
-    temporal_extent_end: datetime | None
-    spatial_extent: dict | None = None
-    license: str | None
-    item_count: int
-    total_size_bytes: int
-    parent_dataset_id: UUID | None
+    geometry: dict | None
+    temporal_extent: dict | None
+    metadata: dict | None = Field(
+        default=None,
+        validation_alias="metadata_",
+        serialization_alias="metadata",
+    )
     created_by: UUID | None
-    metadata: dict = Field(default_factory=dict, validation_alias="metadata_")
     created_at: datetime
     updated_at: datetime
-
-    @field_serializer("spatial_extent")
-    def _serialize_spatial_extent(self, value):
-        return serialize_geometry(value)
+    deleted_at: datetime | None
 
 
 class DatasetListResponse(PaginatedResponse):

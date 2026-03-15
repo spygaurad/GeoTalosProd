@@ -57,12 +57,13 @@ async def create_organization(
 ):
     service = OrganizationService(db)
     organization = await service.create_organization(payload)
-    log_audit_event(
+    await log_audit_event(
         action="organizations.create",
         actor_id=str(current_user.id),
         organization_id=str(organization.id),
         entity="organization",
         entity_id=str(organization.id),
+        session=db,
     )
     return organization
 
@@ -79,12 +80,13 @@ async def update_organization_by_id(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     service = OrganizationService(db)
     organization = await service.update_organization(organization_id, payload)
-    log_audit_event(
+    await log_audit_event(
         action="organizations.update",
         actor_id=str(current_user.id),
         organization_id=str(organization_id),
         entity="organization",
         entity_id=str(organization_id),
+        session=db,
     )
     return organization
 
@@ -100,10 +102,11 @@ async def delete_organization_by_id(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     service = OrganizationService(db)
     await service.delete_organization(organization_id)
-    log_audit_event(
+    await log_audit_event(
         action="organizations.delete",
         actor_id=str(current_user.id),
         organization_id=str(organization_id),
         entity="organization",
         entity_id=str(organization_id),
+        session=db,
     )

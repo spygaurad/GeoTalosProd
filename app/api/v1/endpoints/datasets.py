@@ -16,8 +16,6 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 @router.get("", response_model=DatasetListResponse)
 async def list_datasets(
     organization_id: UUID | None = Query(default=None),
-    project_id: UUID | None = Query(default=None),
-    status: str | None = Query(default=None),
     limit: int = Depends(limit_param),
     offset: int = Depends(offset_param),
     org_id: UUID = Depends(require_org_role("org:viewer")),
@@ -31,8 +29,6 @@ async def list_datasets(
         limit=limit,
         offset=offset,
         organization_id=org_id,
-        project_id=project_id,
-        status=status,
     )
     return DatasetListResponse(items=items, total=total, limit=limit, offset=offset)
 
@@ -59,13 +55,13 @@ async def create_dataset(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     service = DatasetService(db)
     dataset = await service.create_dataset(payload)
-    log_audit_event(
+    await log_audit_event(
         action="datasets.create",
         actor_id=str(current_user.id),
         organization_id=str(org_id),
         entity="dataset",
         entity_id=str(dataset.id),
-        extra={"project_id": str(payload.project_id) if payload.project_id else None},
+        session=db,
     )
     return dataset
 
@@ -80,13 +76,13 @@ async def update_dataset_by_id(
 ):
     service = DatasetService(db)
     dataset = await service.update_dataset(dataset_id, payload, organization_id=org_id)
-    log_audit_event(
+    await log_audit_event(
         action="datasets.update",
         actor_id=str(current_user.id),
         organization_id=str(org_id),
         entity="dataset",
         entity_id=str(dataset_id),
-        extra={"project_id": str(payload.project_id) if payload.project_id else None},
+        session=db,
     )
     return dataset
 
@@ -100,10 +96,11 @@ async def delete_dataset_by_id(
 ):
     service = DatasetService(db)
     await service.delete_dataset(dataset_id, organization_id=org_id)
-    log_audit_event(
+    await log_audit_event(
         action="datasets.delete",
         actor_id=str(current_user.id),
         organization_id=str(org_id),
         entity="dataset",
         entity_id=str(dataset_id),
+        session=db,
     )

@@ -53,12 +53,13 @@ async def create_user(
 ):
     service = UserService(db)
     user = await service.create_user(payload)
-    log_audit_event(
+    await log_audit_event(
         action="users.create",
         actor_id=str(current_user.id),
         organization_id=str(organization_id),
         entity="user",
         entity_id=str(user.id),
+        session=db,
     )
     return user
 
@@ -73,12 +74,13 @@ async def update_user_by_id(
 ):
     service = UserService(db)
     user = await service.update_user(user_id, payload, organization_id=organization_id)
-    log_audit_event(
+    await log_audit_event(
         action="users.update",
         actor_id=str(current_user.id),
         organization_id=str(organization_id),
         entity="user",
         entity_id=str(user_id),
+        session=db,
     )
     return user
 
@@ -92,10 +94,11 @@ async def delete_user_by_id(
 ):
     service = UserService(db)
     await service.delete_user(user_id, organization_id=organization_id)
-    log_audit_event(
+    await log_audit_event(
         action="users.delete",
         actor_id=str(current_user.id),
         organization_id=str(organization_id),
         entity="user",
         entity_id=str(user_id),
+        session=db,
     )

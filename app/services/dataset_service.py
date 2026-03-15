@@ -23,8 +23,6 @@ class DatasetService:
         limit: int,
         offset: int,
         organization_id: UUID | None = None,
-        project_id: UUID | None = None,
-        status: str | None = None,
     ) -> tuple[Sequence[Dataset], int]:
         query = select(Dataset)
         count_query = select(func.count()).select_from(Dataset)
@@ -32,22 +30,14 @@ class DatasetService:
         if organization_id is not None:
             query = query.where(Dataset.organization_id == organization_id)
             count_query = count_query.where(Dataset.organization_id == organization_id)
-        if project_id is not None:
-            query = query.where(Dataset.project_id == project_id)
-            count_query = count_query.where(Dataset.project_id == project_id)
-        if status is not None:
-            query = query.where(Dataset.status == status)
-            count_query = count_query.where(Dataset.status == status)
 
         rows = await self.db.scalars(
             query.order_by(Dataset.created_at.desc()).limit(limit).offset(offset)
         )
         total = await self.db.scalar(count_query)
         logger.debug(
-            "list_datasets organization_id=%s project_id=%s status=%s limit=%s offset=%s total=%s",
+            "list_datasets organization_id=%s limit=%s offset=%s total=%s",
             organization_id,
-            project_id,
-            status,
             limit,
             offset,
             total or 0,
@@ -71,9 +61,10 @@ class DatasetService:
 
     async def create_dataset(self, payload: DatasetCreate) -> Dataset:
         data = payload.model_dump()
-        data["metadata_"] = data.pop("metadata")
-        if data.get("spatial_extent") is not None:
-            data["spatial_extent"] = parse_geometry(data["spatial_extent"])
+        if "metadata" in data:
+            data["metadata_"] = data.pop("metadata")
+        if data.get("geometry") is not None:
+            data["geometry"] = parse_geometry(data["geometry"])
         dataset = Dataset(**data)
         self.db.add(dataset)
         try:
@@ -92,12 +83,10 @@ class DatasetService:
         dataset = await self.get_dataset(dataset_id, organization_id=organization_id)
         data = payload.model_dump(exclude_unset=True)
 
-        if "spatial_extent" in data:
-            data["spatial_extent"] = parse_geometry(data["spatial_extent"])
+        if "geometry" in data:
+            data["geometry"] = parse_geometry(data["geometry"])
         if "metadata" in data:
             data["metadata_"] = data.pop("metadata")
-        if data.get("tags") is None and "tags" in data:
-            data["tags"] = []
 
         for key, value in data.items():
             setattr(dataset, key, value)

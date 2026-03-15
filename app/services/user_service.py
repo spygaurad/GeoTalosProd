@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import conflict, not_found
-from app.models.org_membership import OrgMembership
+from app.models.organization_member import OrganizationMember
 from app.models.user import User
 from app.schemas.user import UserCreate, UserUpdate
 
@@ -29,17 +29,19 @@ class UserService:
         count_query = select(func.count()).select_from(User)
 
         if organization_id is not None:
-            query = query.join(OrgMembership, OrgMembership.user_id == User.id).where(
-                OrgMembership.organization_id == organization_id
+            query = query.join(OrganizationMember, OrganizationMember.user_id == User.id).where(
+                OrganizationMember.organization_id == organization_id
             )
-            count_query = count_query.join(OrgMembership, OrgMembership.user_id == User.id).where(
-                OrgMembership.organization_id == organization_id
-            )
+            count_query = count_query.join(
+                OrganizationMember, OrganizationMember.user_id == User.id
+            ).where(OrganizationMember.organization_id == organization_id)
         if user_id is not None:
             query = query.where(User.id == user_id)
             count_query = count_query.where(User.id == user_id)
 
-        rows = await self.db.scalars(query.order_by(User.created_at.desc()).limit(limit).offset(offset))
+        rows = await self.db.scalars(
+            query.order_by(User.created_at.desc()).limit(limit).offset(offset)
+        )
         total = await self.db.scalar(count_query)
         logger.debug(
             "list_users organization_id=%s user_id=%s limit=%s offset=%s total=%s",
@@ -57,8 +59,8 @@ class UserService:
         else:
             result = await self.db.execute(
                 select(User)
-                .join(OrgMembership, OrgMembership.user_id == User.id)
-                .where(User.id == user_id, OrgMembership.organization_id == organization_id)
+                .join(OrganizationMember, OrganizationMember.user_id == User.id)
+                .where(User.id == user_id, OrganizationMember.organization_id == organization_id)
             )
             user = result.scalar_one_or_none()
         if user is None:
@@ -73,8 +75,8 @@ class UserService:
             await self.db.commit()
         except IntegrityError as exc:
             await self.db.rollback()
-            logger.warning("create_user_conflict clerk_user_id=%s", payload.clerk_user_id)
-            raise conflict("User with same clerk_user_id already exists") from exc
+            logger.warning("create_user_conflict clerk_id=%s", payload.clerk_id)
+            raise conflict("User with same clerk_id already exists") from exc
         await self.db.refresh(user)
         logger.info("create_user_success user_id=%s", user.id)
         return user

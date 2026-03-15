@@ -14,6 +14,12 @@ from app.middleware.clerk_auth import ClerkAuthMiddleware
 configure_logging(settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
+if settings.ENVIRONMENT != "development":
+    if not settings.BACKEND_CORS_ORIGINS or "*" in settings.BACKEND_CORS_ORIGINS:
+        raise RuntimeError(
+            "BACKEND_CORS_ORIGINS must be an explicit allowlist in non-development environments."
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -56,11 +62,11 @@ async def _seed_dev_fixtures() -> None:
                 pg_insert(User.__table__)
                 .values(
                     id=uuid.UUID("00000000-0000-0000-0000-000000000002"),
-                    clerk_user_id=dev_user_clerk_id,
+                    clerk_id=dev_user_clerk_id,
                     email="dev@localhost",
                     name="Dev User",
                 )
-                .on_conflict_do_nothing(index_elements=["clerk_user_id"])
+                .on_conflict_do_nothing(index_elements=["clerk_id"])
             )
 
 

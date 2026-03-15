@@ -7,13 +7,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import conflict, not_found
-from app.models.model import MLModel
-from app.schemas.model import ModelCreate, ModelUpdate
+from app.models.ai_model import AIModel
+from app.schemas.ai_model import AIModelCreate, AIModelUpdate
 
 logger = logging.getLogger(__name__)
 
 
-class ModelService:
+class AIModelService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
 
@@ -22,16 +22,16 @@ class ModelService:
         limit: int,
         offset: int,
         organization_id: UUID | None = None,
-    ) -> tuple[Sequence[MLModel], int]:
-        query = select(MLModel)
-        count_query = select(func.count()).select_from(MLModel)
+    ) -> tuple[Sequence[AIModel], int]:
+        query = select(AIModel)
+        count_query = select(func.count()).select_from(AIModel)
 
         if organization_id is not None:
-            query = query.where(MLModel.organization_id == organization_id)
-            count_query = count_query.where(MLModel.organization_id == organization_id)
+            query = query.where(AIModel.organization_id == organization_id)
+            count_query = count_query.where(AIModel.organization_id == organization_id)
 
         rows = await self.db.scalars(
-            query.order_by(MLModel.created_at.desc()).limit(limit).offset(offset)
+            query.order_by(AIModel.created_at.desc()).limit(limit).offset(offset)
         )
         total = await self.db.scalar(count_query)
         logger.debug(
@@ -43,13 +43,13 @@ class ModelService:
         )
         return rows.all(), int(total or 0)
 
-    async def get_model(self, model_id: UUID, organization_id: UUID | None = None) -> MLModel:
+    async def get_model(self, model_id: UUID, organization_id: UUID | None = None) -> AIModel:
         if organization_id is None:
-            model = await self.db.get(MLModel, model_id)
+            model = await self.db.get(AIModel, model_id)
         else:
             result = await self.db.execute(
-                select(MLModel).where(
-                    MLModel.id == model_id, MLModel.organization_id == organization_id
+                select(AIModel).where(
+                    AIModel.id == model_id, AIModel.organization_id == organization_id
                 )
             )
             model = result.scalar_one_or_none()
@@ -58,9 +58,8 @@ class ModelService:
             raise not_found("Model")
         return model
 
-    async def create_model(self, payload: ModelCreate) -> MLModel:
-        data = payload.model_dump(by_alias=False)
-        model = MLModel(**data)
+    async def create_model(self, payload: AIModelCreate) -> AIModel:
+        model = AIModel(**payload.model_dump())
         self.db.add(model)
         try:
             await self.db.commit()
@@ -73,10 +72,10 @@ class ModelService:
         return model
 
     async def update_model(
-        self, model_id: UUID, payload: ModelUpdate, organization_id: UUID | None = None
-    ) -> MLModel:
+        self, model_id: UUID, payload: AIModelUpdate, organization_id: UUID | None = None
+    ) -> AIModel:
         model = await self.get_model(model_id, organization_id=organization_id)
-        data = payload.model_dump(exclude_unset=True, by_alias=False)
+        data = payload.model_dump(exclude_unset=True)
 
         for key, value in data.items():
             setattr(model, key, value)

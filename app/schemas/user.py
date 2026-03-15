@@ -7,24 +7,24 @@ from app.schemas.common import ORMModel, PaginatedResponse
 
 
 class UserCreate(ORMModel):
-    clerk_user_id: str = Field(min_length=1, max_length=255)
-    email: str | None = Field(default=None, max_length=255)
+    clerk_id: str = Field(min_length=1, max_length=255)
+    email: str = Field(min_length=1, max_length=255)
     name: str | None = Field(default=None, max_length=255)
-    is_active: bool = True
+    avatar_url: str | None = Field(default=None, max_length=500)
 
 
 class UserUpdate(ORMModel):
     email: str | None = Field(default=None, max_length=255)
     name: str | None = Field(default=None, max_length=255)
-    is_active: bool | None = None
+    avatar_url: str | None = Field(default=None, max_length=500)
 
 
 class UserRead(ORMModel):
     id: UUID
-    clerk_user_id: str
-    email: str | None
+    clerk_id: str
+    email: str
     name: str | None
-    is_active: bool
+    avatar_url: str | None
     created_at: datetime
     updated_at: datetime
 

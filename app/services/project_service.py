@@ -1,6 +1,5 @@
 import logging
 from collections.abc import Sequence
-from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -9,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import conflict, not_found
 from app.models.project import Project
-from app.models.project_member import ProjectMember
 from app.schemas.project import ProjectCreate, ProjectUpdate
 
 logger = logging.getLogger(__name__)
@@ -24,7 +22,6 @@ class ProjectService:
         limit: int,
         offset: int,
         organization_id: UUID | None = None,
-        user_id: UUID | None = None,
     ) -> tuple[Sequence[Project], int]:
         query = select(Project)
         count_query = select(func.count()).select_from(Project)
@@ -32,22 +29,14 @@ class ProjectService:
         if organization_id is not None:
             query = query.where(Project.organization_id == organization_id)
             count_query = count_query.where(Project.organization_id == organization_id)
-        if user_id is not None:
-            query = query.join(ProjectMember, ProjectMember.project_id == Project.id).where(
-                ProjectMember.user_id == user_id
-            )
-            count_query = count_query.join(ProjectMember, ProjectMember.project_id == Project.id).where(
-                ProjectMember.user_id == user_id
-            )
 
         rows = await self.db.scalars(
             query.order_by(Project.created_at.desc()).limit(limit).offset(offset)
         )
         total = await self.db.scalar(count_query)
         logger.debug(
-            "list_projects organization_id=%s user_id=%s limit=%s offset=%s total=%s",
+            "list_projects organization_id=%s limit=%s offset=%s total=%s",
             organization_id,
-            user_id,
             limit,
             offset,
             total or 0,
@@ -70,20 +59,18 @@ class ProjectService:
         return project
 
     async def create_project(self, payload: ProjectCreate) -> Project:
-        data = payload.model_dump()
-        data["metadata_"] = data.pop("metadata")
-        project = Project(**data)
+        project = Project(**payload.model_dump())
         self.db.add(project)
         try:
             await self.db.commit()
         except IntegrityError as exc:
             await self.db.rollback()
             logger.warning(
-                "create_project_conflict organization_id=%s slug=%s",
+                "create_project_conflict organization_id=%s name=%s",
                 payload.organization_id,
-                payload.slug,
+                payload.name,
             )
-            raise conflict("Project slug already exists within the organization") from exc
+            raise conflict("Project creation violates uniqueness or FK constraints") from exc
         await self.db.refresh(project)
         logger.info("create_project_success project_id=%s", project.id)
         return project
@@ -94,12 +81,6 @@ class ProjectService:
         project = await self.get_project(project_id, organization_id=organization_id)
         data = payload.model_dump(exclude_unset=True)
 
-        if "metadata" in data:
-            data["metadata_"] = data.pop("metadata")
-        if data.get("status") == "archived" and data.get("archived_at") is None:
-            # Keep archive metadata consistent when caller sets archived status.
-            data["archived_at"] = datetime.now(timezone.utc)
-
         for key, value in data.items():
             setattr(project, key, value)
 
@@ -108,7 +89,7 @@ class ProjectService:
         except IntegrityError as exc:
             await self.db.rollback()
             logger.warning("update_project_conflict project_id=%s", project_id)
-            raise conflict("Project update violates uniqueness or FK constraints") from exc
+            raise conflict("Project update violates constraints") from exc
         await self.db.refresh(project)
         logger.info("update_project_success project_id=%s", project.id)
         return project

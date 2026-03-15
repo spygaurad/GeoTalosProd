@@ -7,8 +7,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import conflict, not_found
-from app.models.org_membership import OrgMembership
-from app.schemas.org_membership import OrgMembershipCreate, OrgMembershipUpdate
+from app.models.organization_member import OrganizationMember
+from app.schemas.organization_member import OrganizationMemberCreate, OrganizationMemberUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -23,19 +23,19 @@ class MembershipService:
         offset: int,
         organization_id: UUID | None = None,
         user_id: UUID | None = None,
-    ) -> tuple[Sequence[OrgMembership], int]:
-        query = select(OrgMembership)
-        count_query = select(func.count()).select_from(OrgMembership)
+    ) -> tuple[Sequence[OrganizationMember], int]:
+        query = select(OrganizationMember)
+        count_query = select(func.count()).select_from(OrganizationMember)
 
         if organization_id is not None:
-            query = query.where(OrgMembership.organization_id == organization_id)
-            count_query = count_query.where(OrgMembership.organization_id == organization_id)
+            query = query.where(OrganizationMember.organization_id == organization_id)
+            count_query = count_query.where(OrganizationMember.organization_id == organization_id)
         if user_id is not None:
-            query = query.where(OrgMembership.user_id == user_id)
-            count_query = count_query.where(OrgMembership.user_id == user_id)
+            query = query.where(OrganizationMember.user_id == user_id)
+            count_query = count_query.where(OrganizationMember.user_id == user_id)
 
         rows = await self.db.scalars(
-            query.order_by(OrgMembership.created_at.desc()).limit(limit).offset(offset)
+            query.order_by(OrganizationMember.joined_at.desc()).limit(limit).offset(offset)
         )
         total = await self.db.scalar(count_query)
         logger.debug(
@@ -48,9 +48,11 @@ class MembershipService:
         )
         return rows.all(), int(total or 0)
 
-    async def get_org_membership(self, organization_id: UUID, user_id: UUID) -> OrgMembership:
+    async def get_org_membership(
+        self, organization_id: UUID, user_id: UUID
+    ) -> OrganizationMember:
         membership = await self.db.get(
-            OrgMembership,
+            OrganizationMember,
             {"organization_id": organization_id, "user_id": user_id},
         )
         if membership is None:
@@ -59,11 +61,13 @@ class MembershipService:
                 organization_id,
                 user_id,
             )
-            raise not_found("Org membership")
+            raise not_found("Organization membership")
         return membership
 
-    async def create_org_membership(self, payload: OrgMembershipCreate) -> OrgMembership:
-        membership = OrgMembership(**payload.model_dump())
+    async def create_org_membership(
+        self, payload: OrganizationMemberCreate
+    ) -> OrganizationMember:
+        membership = OrganizationMember(**payload.model_dump())
         self.db.add(membership)
         try:
             await self.db.commit()
@@ -74,7 +78,7 @@ class MembershipService:
                 payload.organization_id,
                 payload.user_id,
             )
-            raise conflict("Org membership already exists or references an invalid FK") from exc
+            raise conflict("Organization membership already exists or references an invalid FK") from exc
         await self.db.refresh(membership)
         logger.info(
             "create_org_membership_success organization_id=%s user_id=%s",
@@ -84,8 +88,8 @@ class MembershipService:
         return membership
 
     async def update_org_membership(
-        self, organization_id: UUID, user_id: UUID, payload: OrgMembershipUpdate
-    ) -> OrgMembership:
+        self, organization_id: UUID, user_id: UUID, payload: OrganizationMemberUpdate
+    ) -> OrganizationMember:
         membership = await self.get_org_membership(organization_id, user_id)
         for key, value in payload.model_dump(exclude_unset=True).items():
             setattr(membership, key, value)
@@ -98,7 +102,7 @@ class MembershipService:
                 organization_id,
                 user_id,
             )
-            raise conflict("Org membership update violates constraints") from exc
+            raise conflict("Organization membership update violates constraints") from exc
         await self.db.refresh(membership)
         logger.info(
             "update_org_membership_success organization_id=%s user_id=%s",

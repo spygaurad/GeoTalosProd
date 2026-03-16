@@ -17,6 +17,7 @@ from shapely import wkt as shapely_wkt
 from sqlalchemy import select, func
 
 from app.config import settings
+from app.core.enums import DatasetStatus, JobStatus
 from app.models.dataset import Dataset
 from app.models.job import Job
 from app.services import storage_service
@@ -118,8 +119,12 @@ def ingest_dataset(
             logger.error("ingest_dataset job_not_found job_id=%s", job_id)
             return
 
-        job.status = "running"
+        job.status = JobStatus.RUNNING
         job.started_at = _now()
+        # Mark dataset as ingesting so the API can surface this state
+        dataset_early = session.get(Dataset, uuid.UUID(dataset_id))
+        if dataset_early is not None:
+            dataset_early.status = DatasetStatus.INGESTING
         session.commit()
 
         try:
@@ -130,9 +135,11 @@ def ingest_dataset(
             # ── 1. Validate COG ───────────────────────────────────────────────
             is_valid, issues = validate_cog(s3_uri, s3_config)
             if not is_valid:
-                job.status = "failed"
+                job.status = JobStatus.FAILED
                 job.logs = "COG validation failed:\n" + "\n".join(issues)
                 job.finished_at = _now()
+                if dataset_early is not None:
+                    dataset_early.status = DatasetStatus.FAILED
                 session.commit()
                 logger.warning(
                     "ingest_dataset_cog_invalid job_id=%s issues=%s", job_id, issues
@@ -145,7 +152,7 @@ def ingest_dataset(
 
             # ── 3. Upsert STAC Collection ─────────────────────────────────────
             collection_id = f"org-{job.organization_id}-dataset-{dataset_id}"
-            dataset = session.get(Dataset, uuid.UUID(dataset_id))
+            dataset = dataset_early
             if dataset is None:
                 raise ValueError(f"Dataset {dataset_id} not found")
 
@@ -184,7 +191,8 @@ def ingest_dataset(
                 "file_size_bytes": metadata.get("file_size_bytes"),
             }
 
-            job.status = "completed"
+            dataset.status = DatasetStatus.READY
+            job.status = JobStatus.COMPLETED
             job.finished_at = _now()
             session.commit()
 
@@ -197,9 +205,13 @@ def ingest_dataset(
 
         except Exception as exc:
             session.rollback()
-            job.status = "failed"
+            job.status = JobStatus.FAILED
             job.logs = traceback.format_exc()
             job.finished_at = _now()
+            # Re-fetch dataset after rollback so the status update lands cleanly
+            _ds = session.get(Dataset, uuid.UUID(dataset_id))
+            if _ds is not None:
+                _ds.status = DatasetStatus.FAILED
             session.commit()
             logger.error("ingest_dataset_failed job_id=%s error=%s", job_id, exc)
             raise self.retry(exc=exc)

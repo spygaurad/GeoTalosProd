@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     # Must be reachable from the browser, not the container network.
     PUBLIC_MINIO_URL: str = ""
 
+    # ── Internal service URLs ──────────────────────────────────────────────────
+    # STAC FastAPI service (stac-fastapi-pgstac)
+    STAC_API_URL: str = ""
+    # TiTiler (titiler-pgstac) — internal Docker URL; never exposed to browsers
+    TITILER_URL: str = ""
+    # Public-facing API base URL — used to rewrite TiTiler tile URLs in tilejson
+    # responses so browsers call the tile proxy endpoint instead of titiler directly.
+    # No trailing slash. Example: https://api.example.com
+    PUBLIC_API_URL: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=True,

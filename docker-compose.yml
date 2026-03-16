@@ -58,6 +58,10 @@ x-app-env: &app-env
   # Internal service URLs
   STAC_API_URL: http://stac-api:8080
   TITILER_URL: http://titiler:8000
+  # Public URL of the main API — used to rewrite TiTiler tile URLs in tilejson
+  # responses so browsers call the tile proxy instead of titiler directly.
+  # Override in staging/production with the real domain (no trailing slash).
+  PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:2024}
   # MinIO (S3-compatible) — path-style access for local use
   AWS_ENDPOINT_URL: http://minio:9000
   AWS_REGION: ${AWS_REGION:-us-east-1}

@@ -58,6 +58,7 @@ class DatasetRead(ORMModel):
     name: str
     description: str | None
     dataset_type: str
+    status: str
     stac_collection_id: str | None
     geometry: dict | None
     temporal_extent: dict | None

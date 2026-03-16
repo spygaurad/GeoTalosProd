@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_session, require_org_role
 from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
+from app.core.enums import DatasetStatus, JobStatus, JobType
 from app.core.exceptions import not_found
 from app.models.job import Job
 from app.models.user import User
@@ -27,6 +28,7 @@ from app.schemas.dataset import (
 )
 from app.services.dataset_service import DatasetService
 from app.services import storage_service
+from app.services import titiler_service
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -153,6 +155,46 @@ async def delete_dataset_by_id(
     )
 
 
+# ── TiTiler tilejson ──────────────────────────────────────────────────────────
+
+
+@router.get("/{dataset_id}/tilejson")
+async def get_dataset_tilejson(
+    dataset_id: UUID,
+    assets: str | None = Query(default=None, description="Comma-separated asset names, e.g. B04,B03,B02"),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    """Return a TileJSON document for rendering this dataset on Leaflet/MapLibre.
+
+    Tile URLs in the response are rewritten to go through the API tile proxy
+    (``GET /api/v1/tiles/mosaic/{searchid}/...``) so that auth is enforced on
+    every tile request and no additional public port is needed.
+
+    The dataset must have ``status = 'ready'`` (ingestion complete) before
+    tiles can be served.
+    """
+    service = DatasetService(db)
+    dataset = await service.get_dataset(dataset_id, organization_id=org_id)
+
+    if dataset.status != DatasetStatus.READY:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Dataset is not ready for tile serving (status: {dataset.status})",
+        )
+    if not dataset.stac_collection_id:
+        raise HTTPException(status_code=409, detail="Dataset has no STAC collection registered")
+
+    try:
+        searchid = await titiler_service.register_collection_mosaic(dataset.stac_collection_id)
+        tilejson = await titiler_service.get_mosaic_tilejson(searchid, assets=assets)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {**tilejson, "dataset_id": str(dataset_id), "searchid": searchid}
+
+
 # ── Upload sub-resources ──────────────────────────────────────────────────────
 
 
@@ -185,8 +227,8 @@ async def initiate_dataset_upload(
     # Create a Job to track the ingestion lifecycle
     job = Job(
         organization_id=org_id,
-        type="ingest",
-        status="pending",
+        type=JobType.INGEST,
+        status=JobStatus.PENDING,
         config={
             "s3_key": s3_key,
             "filename": payload.filename,
@@ -274,12 +316,12 @@ async def complete_dataset_upload(
         )
     except Exception as exc:
         await asyncio.to_thread(storage_service.abort_upload, org_id, s3_key, upload_id)
-        job.status = "failed"
+        job.status = JobStatus.FAILED
         job.logs = str(exc)
         await db.commit()
         raise HTTPException(status_code=500, detail="Upload completion failed") from exc
 
-    job.status = "queued"
+    job.status = JobStatus.QUEUED
     await db.commit()
 
     # Import here to avoid circular imports at module load time
@@ -288,3 +330,28 @@ async def complete_dataset_upload(
     ingest_dataset.apply_async(args=[str(job.id), str(dataset_id), s3_key, filename])
 
     return UploadJobResponse(job_id=job.id)
+
+
+@router.delete(
+    "/{dataset_id}/uploads/{upload_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def abort_dataset_upload(
+    dataset_id: UUID,
+    upload_id: str,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    """Cancel an in-progress multipart upload.
+
+    Calls MinIO's AbortMultipartUpload to release any already-uploaded parts
+    and marks the associated Job as ``cancelled``.  Safe to call multiple times.
+    """
+    job = await _get_upload_job(db, upload_id, org_id, dataset_id)
+    s3_key = job.config["s3_key"]
+
+    await asyncio.to_thread(storage_service.abort_upload, org_id, s3_key, upload_id)
+
+    job.status = JobStatus.CANCELLED
+    await db.commit()

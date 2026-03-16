@@ -20,6 +20,7 @@ class Dataset(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     dataset_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="pending")
     stac_collection_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     geometry: Mapped[object | None] = mapped_column(Geometry("POLYGON", srid=4326))
     temporal_extent: Mapped[object | None] = mapped_column(TSTZRANGE)

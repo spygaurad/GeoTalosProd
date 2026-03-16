@@ -9,11 +9,11 @@ from app.schemas.common import ORMModel, PaginatedResponse
 class OrganizationMemberCreate(ORMModel):
     organization_id: UUID
     user_id: UUID
-    role: str = Field(min_length=1, max_length=20)
+    role: str = Field(min_length=1, max_length=50)
 
 
 class OrganizationMemberUpdate(ORMModel):
-    role: str | None = Field(default=None, min_length=1, max_length=20)
+    role: str | None = Field(default=None, min_length=1, max_length=50)
 
 
 class OrganizationMemberRead(ORMModel):

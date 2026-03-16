@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -23,8 +24,8 @@ class AIModelService:
         offset: int,
         organization_id: UUID | None = None,
     ) -> tuple[Sequence[AIModel], int]:
-        query = select(AIModel)
-        count_query = select(func.count()).select_from(AIModel)
+        query = select(AIModel).where(AIModel.deleted_at.is_(None))
+        count_query = select(func.count()).select_from(AIModel).where(AIModel.deleted_at.is_(None))
 
         if organization_id is not None:
             query = query.where(AIModel.organization_id == organization_id)
@@ -92,6 +93,6 @@ class AIModelService:
 
     async def delete_model(self, model_id: UUID, organization_id: UUID | None = None) -> None:
         model = await self.get_model(model_id, organization_id=organization_id)
-        await self.db.delete(model)
+        model.deleted_at = datetime.now(UTC).replace(tzinfo=None)
         await self.db.commit()
         logger.info("delete_model_success model_id=%s", model_id)

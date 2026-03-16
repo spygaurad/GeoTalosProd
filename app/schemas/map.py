@@ -11,14 +11,12 @@ class MapCreate(ORMModel):
     name: str = Field(min_length=1, max_length=255)
     view_state: dict
     base_style: dict | None = None
-    created_by: UUID | None = None
 
 
 class MapUpdate(ORMModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     view_state: dict | None = None
     base_style: dict | None = None
-    deleted_at: datetime | None = None
 
 
 class MapRead(ORMModel):
@@ -33,5 +31,4 @@ class MapRead(ORMModel):
     deleted_at: datetime | None
 
 
-class MapListResponse(PaginatedResponse):
-    items: list[MapRead]
+MapListResponse = PaginatedResponse[MapRead]

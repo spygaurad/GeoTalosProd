@@ -1,14 +1,26 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 
+from app.core.ranges import tstzrange_to_dict
 from app.schemas.common import ORMModel, PaginatedResponse
 
 
-class DatasetCreate(ORMModel):
+class _DatasetBase(ORMModel):
+    """Shared helper — provides ``model_dump_db`` to rename ``metadata`` → ``metadata_``."""
+
     model_config = ConfigDict(populate_by_name=True)
 
+    def model_dump_db(self, **kwargs: Any) -> dict:
+        data = self.model_dump(**kwargs)
+        if "metadata" in data:
+            data["metadata_"] = data.pop("metadata")
+        return data
+
+
+class DatasetCreate(_DatasetBase):
     organization_id: UUID
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
@@ -24,9 +36,7 @@ class DatasetCreate(ORMModel):
     created_by: UUID | None = None
 
 
-class DatasetUpdate(ORMModel):
-    model_config = ConfigDict(populate_by_name=True)
-
+class DatasetUpdate(_DatasetBase):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     dataset_type: str | None = Field(default=None, min_length=1, max_length=50)
@@ -38,7 +48,6 @@ class DatasetUpdate(ORMModel):
         validation_alias="metadata_",
         serialization_alias="metadata",
     )
-    deleted_at: datetime | None = None
 
 
 class DatasetRead(ORMModel):
@@ -62,6 +71,10 @@ class DatasetRead(ORMModel):
     updated_at: datetime
     deleted_at: datetime | None
 
+    @field_validator("temporal_extent", mode="before")
+    @classmethod
+    def _coerce_temporal_extent(cls, value: Any) -> dict | None:
+        return tstzrange_to_dict(value)
 
-class DatasetListResponse(PaginatedResponse):
-    items: list[DatasetRead]
+
+DatasetListResponse = PaginatedResponse[DatasetRead]

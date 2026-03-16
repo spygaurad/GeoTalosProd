@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -25,8 +26,8 @@ class MapService:
         organization_id: UUID | None = None,
         project_id: UUID | None = None,
     ) -> tuple[Sequence[Map], int]:
-        query = select(Map)
-        count_query = select(func.count()).select_from(Map)
+        query = select(Map).where(Map.deleted_at.is_(None))
+        count_query = select(func.count()).select_from(Map).where(Map.deleted_at.is_(None))
 
         if project_id is not None:
             query = query.where(Map.project_id == project_id)
@@ -73,8 +74,10 @@ class MapService:
             raise not_found("Map")
         return map_row
 
-    async def create_map(self, payload: MapCreate) -> Map:
-        map_row = Map(**payload.model_dump())
+    async def create_map(self, payload: MapCreate, created_by: UUID | None = None) -> Map:
+        data = payload.model_dump()
+        data["created_by"] = created_by
+        map_row = Map(**data)
         self.db.add(map_row)
         try:
             await self.db.commit()
@@ -114,6 +117,6 @@ class MapService:
         project_id: UUID | None = None,
     ) -> None:
         map_row = await self.get_map(map_id, organization_id=organization_id, project_id=project_id)
-        await self.db.delete(map_row)
+        map_row.deleted_at = datetime.now(UTC).replace(tzinfo=None)
         await self.db.commit()
         logger.info("delete_map_success map_id=%s", map_row.id)

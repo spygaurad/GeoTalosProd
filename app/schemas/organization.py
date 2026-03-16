@@ -35,5 +35,4 @@ class OrganizationRead(ORMModel):
     updated_at: datetime
 
 
-class OrganizationListResponse(PaginatedResponse):
-    items: list[OrganizationRead]
+OrganizationListResponse = PaginatedResponse[OrganizationRead]

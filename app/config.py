@@ -24,10 +24,13 @@ class Settings(BaseSettings):
     INTERNAL_API_KEY: str = ""
 
     # ── STAC Catalog DB ───────────────────────────────────────────────────────
-    # Write path — pgstac_ingest role (asyncpg)
+    # Write path — pgstac_ingest role (asyncpg, used by FastAPI)
     STAC_DATABASE_URL: str = ""
-    # Read-only pool — pgstac_read role (asyncpg)
+    # Read-only pool — pgstac_read role (asyncpg, used by FastAPI)
     STAC_READ_URL: str = ""
+    # Sync psycopg2 DSN for pypgstac inside Celery workers (pgstac_ingest role).
+    # Format: postgresql://pgstac_ingest:password@host:port/pgstac
+    STAC_SYNC_DATABASE_URL: str = ""
 
     # ── Celery / Redis ────────────────────────────────────────────────────────
     # Sync psycopg2 connection for Celery workers (BYPASSRLS role).

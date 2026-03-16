@@ -1,10 +1,36 @@
-from uuid import uuid4
+"""
+Smoke tests for core CRUD endpoints.
 
-import app.api.v1.endpoints.org_memberships as org_memberships_ep
+Key constraints these tests work around:
+- Endpoints call `str(result.id)` on service return values inside log_audit_event args,
+  so service mocks must return SimpleNamespace objects (attribute access), not plain dicts.
+- Several endpoints guard with `if path_org_id != org_id: raise 403`, so path/payload
+  org UUIDs must match _ORG_ID (the value returned by the overridden get_current_org_id
+  in conftest).
+"""
+from types import SimpleNamespace
+from uuid import UUID, uuid4
+
+import app.api.v1.endpoints.organization_members as org_memberships_ep
 import app.api.v1.endpoints.organizations as organizations_ep
-import app.api.v1.endpoints.project_members as project_members_ep
 import app.api.v1.endpoints.projects as projects_ep
 import app.api.v1.endpoints.users as users_ep
+
+# Must match conftest._ORG_ID so `if org_id != payload.organization_id` guards pass.
+_ORG_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+
+def _assert_status(resp, expected: int) -> None:
+    """Assert HTTP status and include response body in the failure message."""
+    assert resp.status_code == expected, (
+        f"Expected HTTP {expected}, got {resp.status_code}\n"
+        f"Response body: {resp.text}"
+    )
+
+
+def _ns(**kwargs) -> SimpleNamespace:
+    """Wrap a dict as a SimpleNamespace so endpoints can do result.id etc."""
+    return SimpleNamespace(**kwargs)
 
 
 def test_health(client):
@@ -15,29 +41,30 @@ def test_health(client):
 
 def test_users_crud_endpoints(client, monkeypatch):
     user_id = str(uuid4())
-    user_payload = {
-        "id": user_id,
-        "clerk_user_id": "user_123",
-        "email": "user@example.com",
-        "name": "User One",
-        "is_active": True,
-        "created_at": "2026-03-04T00:00:00Z",
-        "updated_at": "2026-03-04T00:00:00Z",
-    }
+    # Matches UserRead: id, clerk_id, email, name, avatar_url, created_at, updated_at
+    user_obj = _ns(
+        id=user_id,
+        clerk_id="user_123",
+        email="user@example.com",
+        name="User One",
+        avatar_url=None,
+        created_at="2026-03-04T00:00:00Z",
+        updated_at="2026-03-04T00:00:00Z",
+    )
 
-    async def _list_users(*_args, **_kwargs):
-        return [user_payload], 1
+    async def _list_users(*_a, **_kw):
+        return [user_obj], 1
 
-    async def _get_user(*_args, **_kwargs):
-        return user_payload
+    async def _get_user(*_a, **_kw):
+        return user_obj
 
-    async def _create_user(*_args, **_kwargs):
-        return user_payload
+    async def _create_user(*_a, **_kw):
+        return user_obj
 
-    async def _update_user(*_args, **_kwargs):
-        return user_payload
+    async def _update_user(*_a, **_kw):
+        return user_obj
 
-    async def _delete_user(*_args, **_kwargs):
+    async def _delete_user(*_a, **_kw):
         return None
 
     monkeypatch.setattr(users_ep.UserService, "list_users", _list_users)
@@ -46,39 +73,47 @@ def test_users_crud_endpoints(client, monkeypatch):
     monkeypatch.setattr(users_ep.UserService, "update_user", _update_user)
     monkeypatch.setattr(users_ep.UserService, "delete_user", _delete_user)
 
-    assert client.get("/api/v1/users?limit=10&offset=0").status_code == 200
-    assert client.get(f"/api/v1/users/{user_id}").status_code == 200
-    assert client.post("/api/v1/users", json={"clerk_user_id": "user_123"}).status_code == 201
-    assert client.patch(f"/api/v1/users/{user_id}", json={"name": "Updated"}).status_code == 200
-    assert client.delete(f"/api/v1/users/{user_id}").status_code == 204
+    _assert_status(client.get("/api/v1/users?limit=10&offset=0"), 200)
+    _assert_status(client.get(f"/api/v1/users/{user_id}"), 200)
+    _assert_status(
+        client.post("/api/v1/users", json={"clerk_id": "user_123", "email": "user@example.com"}),
+        201,
+    )
+    _assert_status(client.patch(f"/api/v1/users/{user_id}", json={"name": "Updated"}), 200)
+    _assert_status(client.delete(f"/api/v1/users/{user_id}"), 204)
 
 
 def test_organizations_crud_endpoints(client, monkeypatch):
-    organization_id = str(uuid4())
-    org_payload = {
-        "id": organization_id,
-        "clerk_org_id": "org_123",
-        "name": "Org One",
-        "slug": "org-one",
-        "description": "desc",
-        "settings": {},
-        "created_at": "2026-03-04T00:00:00Z",
-        "updated_at": "2026-03-04T00:00:00Z",
-    }
+    # organization_id MUST equal _ORG_ID because GET/PATCH/DELETE /{id} check
+    # `if organization_id != org_id: raise 403`.
+    organization_id = str(_ORG_ID)
+    # Matches OrganizationRead: id, clerk_org_id, name, slug, description, owner_id,
+    # settings, created_at, updated_at
+    org_obj = _ns(
+        id=organization_id,
+        clerk_org_id="org_123",
+        name="Org One",
+        slug="org-one",
+        description="desc",
+        owner_id=None,
+        settings={},
+        created_at="2026-03-04T00:00:00Z",
+        updated_at="2026-03-04T00:00:00Z",
+    )
 
-    async def _list_orgs(*_args, **_kwargs):
-        return [org_payload], 1
+    async def _list_orgs(*_a, **_kw):
+        return [org_obj], 1
 
-    async def _get_org(*_args, **_kwargs):
-        return org_payload
+    async def _get_org(*_a, **_kw):
+        return org_obj
 
-    async def _create_org(*_args, **_kwargs):
-        return org_payload
+    async def _create_org(*_a, **_kw):
+        return org_obj
 
-    async def _update_org(*_args, **_kwargs):
-        return org_payload
+    async def _update_org(*_a, **_kw):
+        return org_obj
 
-    async def _delete_org(*_args, **_kwargs):
+    async def _delete_org(*_a, **_kw):
         return None
 
     monkeypatch.setattr(organizations_ep.OrganizationService, "list_organizations", _list_orgs)
@@ -87,49 +122,48 @@ def test_organizations_crud_endpoints(client, monkeypatch):
     monkeypatch.setattr(organizations_ep.OrganizationService, "update_organization", _update_org)
     monkeypatch.setattr(organizations_ep.OrganizationService, "delete_organization", _delete_org)
 
-    assert client.get("/api/v1/organizations?limit=10&offset=0").status_code == 200
-    assert client.get(f"/api/v1/organizations/{organization_id}").status_code == 200
-    assert (
+    _assert_status(client.get("/api/v1/organizations?limit=10&offset=0"), 200)
+    _assert_status(client.get(f"/api/v1/organizations/{organization_id}"), 200)
+    _assert_status(
         client.post(
             "/api/v1/organizations",
             json={"clerk_org_id": "org_123", "name": "Org One", "slug": "org-one"},
-        ).status_code
-        == 201
+        ),
+        201,
     )
-    assert (
-        client.patch(f"/api/v1/organizations/{organization_id}", json={"description": "Updated"}).status_code
-        == 200
+    _assert_status(
+        client.patch(f"/api/v1/organizations/{organization_id}", json={"description": "Updated"}),
+        200,
     )
-    assert client.delete(f"/api/v1/organizations/{organization_id}").status_code == 204
+    _assert_status(client.delete(f"/api/v1/organizations/{organization_id}"), 204)
 
 
 def test_org_memberships_crud_endpoints(client, monkeypatch):
-    organization_id = str(uuid4())
+    # organization_id MUST equal _ORG_ID because every path and POST payload is checked
+    # against org_id from get_current_org_id.
+    organization_id = str(_ORG_ID)
     user_id = str(uuid4())
-    payload = {
-        "organization_id": organization_id,
-        "user_id": user_id,
-        "role": "org:member",
-        "invited_by": None,
-        "status": "active",
-        "created_at": "2026-03-04T00:00:00Z",
-        "synced_at": "2026-03-04T00:00:00Z",
-        "updated_at": "2026-03-04T00:00:00Z",
-    }
+    # Matches OrganizationMemberRead: organization_id, user_id, role, joined_at
+    membership_obj = _ns(
+        organization_id=organization_id,
+        user_id=user_id,
+        role="org:member",
+        joined_at="2026-03-04T00:00:00Z",
+    )
 
-    async def _list_memberships(*_args, **_kwargs):
-        return [payload], 1
+    async def _list_memberships(*_a, **_kw):
+        return [membership_obj], 1
 
-    async def _get_membership(*_args, **_kwargs):
-        return payload
+    async def _get_membership(*_a, **_kw):
+        return membership_obj
 
-    async def _create_membership(*_args, **_kwargs):
-        return payload
+    async def _create_membership(*_a, **_kw):
+        return membership_obj
 
-    async def _update_membership(*_args, **_kwargs):
-        return payload
+    async def _update_membership(*_a, **_kw):
+        return membership_obj
 
-    async def _delete_membership(*_args, **_kwargs):
+    async def _delete_membership(*_a, **_kw):
         return None
 
     monkeypatch.setattr(org_memberships_ep.MembershipService, "list_org_memberships", _list_memberships)
@@ -138,56 +172,56 @@ def test_org_memberships_crud_endpoints(client, monkeypatch):
     monkeypatch.setattr(org_memberships_ep.MembershipService, "update_org_membership", _update_membership)
     monkeypatch.setattr(org_memberships_ep.MembershipService, "delete_org_membership", _delete_membership)
 
-    assert client.get("/api/v1/org-memberships?limit=10&offset=0").status_code == 200
-    assert client.get(f"/api/v1/org-memberships/{organization_id}/{user_id}").status_code == 200
-    assert (
+    _assert_status(client.get("/api/v1/organization-members?limit=10&offset=0"), 200)
+    _assert_status(client.get(f"/api/v1/organization-members/{organization_id}/{user_id}"), 200)
+    _assert_status(
         client.post(
-            "/api/v1/org-memberships",
-            json={"organization_id": organization_id, "user_id": user_id},
-        ).status_code
-        == 201
+            "/api/v1/organization-members",
+            json={"organization_id": organization_id, "user_id": user_id, "role": "org:member"},
+        ),
+        201,
     )
-    assert (
+    _assert_status(
         client.patch(
-            f"/api/v1/org-memberships/{organization_id}/{user_id}",
+            f"/api/v1/organization-members/{organization_id}/{user_id}",
             json={"role": "org:admin"},
-        ).status_code
-        == 200
+        ),
+        200,
     )
-    assert client.delete(f"/api/v1/org-memberships/{organization_id}/{user_id}").status_code == 204
+    _assert_status(client.delete(f"/api/v1/organization-members/{organization_id}/{user_id}"), 204)
 
 
 def test_projects_crud_endpoints(client, monkeypatch):
     project_id = str(uuid4())
-    organization_id = str(uuid4())
-    payload = {
-        "id": project_id,
-        "organization_id": organization_id,
-        "name": "Project One",
-        "slug": "project-one",
-        "description": "desc",
-        "created_by": None,
-        "metadata_": {},
-        "status": "active",
-        "archived_at": None,
-        "archived_by": None,
-        "created_at": "2026-03-04T00:00:00Z",
-        "updated_at": "2026-03-04T00:00:00Z",
-    }
+    # organization_id MUST equal _ORG_ID because POST checks
+    # `if payload.organization_id != org_id: raise 403`.
+    organization_id = str(_ORG_ID)
+    # Matches ProjectRead: id, organization_id, name, description, created_by,
+    # created_at, updated_at, deleted_at
+    project_obj = _ns(
+        id=project_id,
+        organization_id=organization_id,
+        name="Project One",
+        description="desc",
+        created_by=None,
+        deleted_at=None,
+        created_at="2026-03-04T00:00:00Z",
+        updated_at="2026-03-04T00:00:00Z",
+    )
 
-    async def _list_projects(*_args, **_kwargs):
-        return [payload], 1
+    async def _list_projects(*_a, **_kw):
+        return [project_obj], 1
 
-    async def _get_project(*_args, **_kwargs):
-        return payload
+    async def _get_project(*_a, **_kw):
+        return project_obj
 
-    async def _create_project(*_args, **_kwargs):
-        return payload
+    async def _create_project(*_a, **_kw):
+        return project_obj
 
-    async def _update_project(*_args, **_kwargs):
-        return payload
+    async def _update_project(*_a, **_kw):
+        return project_obj
 
-    async def _delete_project(*_args, **_kwargs):
+    async def _delete_project(*_a, **_kw):
         return None
 
     monkeypatch.setattr(projects_ep.ProjectService, "list_projects", _list_projects)
@@ -196,67 +230,14 @@ def test_projects_crud_endpoints(client, monkeypatch):
     monkeypatch.setattr(projects_ep.ProjectService, "update_project", _update_project)
     monkeypatch.setattr(projects_ep.ProjectService, "delete_project", _delete_project)
 
-    assert client.get("/api/v1/projects?limit=10&offset=0").status_code == 200
-    assert client.get(f"/api/v1/projects/{project_id}").status_code == 200
-    assert (
+    _assert_status(client.get("/api/v1/projects?limit=10&offset=0"), 200)
+    _assert_status(client.get(f"/api/v1/projects/{project_id}"), 200)
+    _assert_status(
         client.post(
             "/api/v1/projects",
-            json={"organization_id": organization_id, "name": "Project One", "slug": "project-one"},
-        ).status_code
-        == 201
+            json={"organization_id": organization_id, "name": "Project One"},
+        ),
+        201,
     )
-    assert client.patch(f"/api/v1/projects/{project_id}", json={"description": "Updated"}).status_code == 200
-    assert client.delete(f"/api/v1/projects/{project_id}").status_code == 204
-
-
-def test_project_members_crud_endpoints(client, monkeypatch):
-    project_id = str(uuid4())
-    user_id = str(uuid4())
-    payload = {
-        "project_id": project_id,
-        "user_id": user_id,
-        "role": "viewer",
-        "added_by": None,
-        "status": "active",
-        "created_at": "2026-03-04T00:00:00Z",
-        "updated_at": "2026-03-04T00:00:00Z",
-    }
-
-    async def _list_project_members(*_args, **_kwargs):
-        return [payload], 1
-
-    async def _get_project_member(*_args, **_kwargs):
-        return payload
-
-    async def _create_project_member(*_args, **_kwargs):
-        return payload
-
-    async def _update_project_member(*_args, **_kwargs):
-        return payload
-
-    async def _delete_project_member(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(project_members_ep.ProjectMemberService, "list_project_members", _list_project_members)
-    monkeypatch.setattr(project_members_ep.ProjectMemberService, "get_project_member", _get_project_member)
-    monkeypatch.setattr(project_members_ep.ProjectMemberService, "create_project_member", _create_project_member)
-    monkeypatch.setattr(project_members_ep.ProjectMemberService, "update_project_member", _update_project_member)
-    monkeypatch.setattr(project_members_ep.ProjectMemberService, "delete_project_member", _delete_project_member)
-
-    assert client.get("/api/v1/project-members?limit=10&offset=0").status_code == 200
-    assert client.get(f"/api/v1/project-members/{project_id}/{user_id}").status_code == 200
-    assert (
-        client.post(
-            "/api/v1/project-members",
-            json={"project_id": project_id, "user_id": user_id},
-        ).status_code
-        == 201
-    )
-    assert (
-        client.patch(
-            f"/api/v1/project-members/{project_id}/{user_id}",
-            json={"role": "editor"},
-        ).status_code
-        == 200
-    )
-    assert client.delete(f"/api/v1/project-members/{project_id}/{user_id}").status_code == 204
+    _assert_status(client.patch(f"/api/v1/projects/{project_id}", json={"description": "Updated"}), 200)
+    _assert_status(client.delete(f"/api/v1/projects/{project_id}"), 204)

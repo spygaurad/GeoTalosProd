@@ -49,6 +49,8 @@ x-app-env: &app-env
   STAC_DATABASE_URL: postgresql+asyncpg://pgstac_ingest:${STAC_INGEST_PASSWORD:-ingest_pass}@stac-db:5432/pgstac
   # STAC Catalog DB — read-only pool
   STAC_READ_URL: postgresql+asyncpg://pgstac_read:${STAC_READ_PASSWORD:-read_pass}@stac-db:5432/pgstac
+  # STAC Catalog DB — sync psycopg2 DSN for pypgstac inside Celery workers
+  STAC_SYNC_DATABASE_URL: postgresql://pgstac_ingest:${STAC_INGEST_PASSWORD:-ingest_pass}@stac-db:5432/pgstac
   # Celery worker DB (psycopg2 sync — BYPASSRLS role)
   CELERY_DATABASE_URL: postgresql+psycopg2://celery_worker:${CELERY_WORKER_PASSWORD:-celery_pass}@app-db:5432/geoplat
   # Broker / result backend

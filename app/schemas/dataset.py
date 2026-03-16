@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.ranges import tstzrange_to_dict
 from app.schemas.common import ORMModel, PaginatedResponse
@@ -78,3 +78,45 @@ class DatasetRead(ORMModel):
 
 
 DatasetListResponse = PaginatedResponse[DatasetRead]
+
+
+# ── Upload sub-resource schemas ───────────────────────────────────────────────
+
+class UploadInitiateRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=512)
+    file_size_bytes: int = Field(gt=0)
+    content_type: str = "image/tiff"
+
+
+class UploadPartUrl(BaseModel):
+    part_number: int
+    url: str
+
+
+class UploadInitiateResponse(BaseModel):
+    upload_id: str
+    job_id: UUID
+    s3_key: str
+    part_size_bytes: int
+    part_urls: list[UploadPartUrl]
+
+
+class PartUrlsRequest(BaseModel):
+    part_numbers: list[int] = Field(min_length=1)
+
+
+class PartUrlsResponse(BaseModel):
+    part_urls: list[UploadPartUrl]
+
+
+class UploadPart(BaseModel):
+    part_number: int
+    etag: str
+
+
+class UploadCompleteRequest(BaseModel):
+    parts: list[UploadPart] = Field(min_length=1)
+
+
+class UploadJobResponse(BaseModel):
+    job_id: UUID

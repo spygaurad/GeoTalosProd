@@ -15,6 +15,7 @@ set -euo pipefail
 
 APP_PWD="${APP_USER_PASSWORD:-app_pass}"
 CELERY_PWD="${CELERY_WORKER_PASSWORD:-celery_pass}"
+MARTIN_READER_PWD="${MARTIN_READER_PASSWORD:-martin_pass}"
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-SQL
 
@@ -25,6 +26,18 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
     CREATE EXTENSION IF NOT EXISTS postgis_topology;
     CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
     CREATE EXTENSION IF NOT EXISTS btree_gist;   -- needed for GIST indexes on range types
+
+    DO \$\$
+    BEGIN
+        CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+        RAISE NOTICE 'pg_stat_statements created successfully.'; -- pg_stat_statements - attempt creation, ignore failure if not preloaded
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'Could not create pg_stat_statements (library not preloaded?). Proceeding without it.';
+    END;
+    \$\$;
+    
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;      -- for gen_random_bytes (used by extensions)
+    CREATE EXTENSION IF NOT EXISTS ltree;         -- for hierarchical paths in annotation_classes
 
     ---------------------------------------------------------------------------
     -- app_user
@@ -90,6 +103,39 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
     ALTER DEFAULT PRIVILEGES IN SCHEMA public
         GRANT USAGE, SELECT ON SEQUENCES TO celery_worker;
 
+    ---------------------------------------------------------------------------
+    -- martin_reader
+    --   Read-only role for the Martin vector tile server.
+    --   BYPASSRLS is required so Martin can read rows regardless of the RLS
+    --   policies (Martin does not set per-request session variables).
+    --   SELECT-only: Martin cannot mutate any data.
+    --   NEVER grant INSERT/UPDATE/DELETE to this role.
+    ---------------------------------------------------------------------------
+    DO \$\$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'martin_reader') THEN
+            CREATE ROLE martin_reader WITH
+                LOGIN
+                PASSWORD '${MARTIN_READER_PWD}'
+                NOSUPERUSER
+                NOCREATEDB
+                NOCREATEROLE
+                NOINHERIT
+                BYPASSRLS
+                CONNECTION LIMIT 10;
+        END IF;
+    END
+    \$\$;
+
+    GRANT CONNECT ON DATABASE geoplat TO martin_reader;
+    GRANT USAGE ON SCHEMA public TO martin_reader;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO martin_reader;
+    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO martin_reader;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT SELECT ON TABLES TO martin_reader;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT USAGE, SELECT ON SEQUENCES TO martin_reader;
+
 SQL
 
-echo "✓ app-db: extensions and roles created."
+echo "✓ app-db:  extensions and roles created (app_user, celery_worker, martin_reader)."

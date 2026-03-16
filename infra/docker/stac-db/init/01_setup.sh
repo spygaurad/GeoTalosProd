@@ -2,7 +2,7 @@
 # =============================================================================
 # stac-db initialisation — runs once on first container start
 #
-# The base image (ghcr.io/stac-utils/pgstac:v0.9.6) installs the pgSTAC
+# The base image (ghcr.io/stac-utils/pgstac:v0.9.10) installs the pgSTAC
 # schema via its own migration, which may run AFTER this script in some
 # versions.  We therefore:
 #   1. Create the roles unconditionally (safe — idempotent DO block).

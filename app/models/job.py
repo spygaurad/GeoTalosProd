@@ -10,7 +10,12 @@ from app.db.base import Base
 
 class Job(Base):
     __tablename__ = "jobs"
-    __table_args__ = (Index("idx_jobs_org", "organization_id"),)
+    __table_args__ = (
+        Index("idx_jobs_org", "organization_id"),
+        Index("idx_jobs_status", "status"),
+        Index("idx_jobs_model", "model_id"),
+        Index("idx_jobs_input_refs", "input_refs", postgresql_using="gin"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v7()")

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -10,7 +10,10 @@ from app.db.base import Base
 
 class AnnotationSchema(Base):
     __tablename__ = "annotation_schemas"
-    __table_args__ = (Index("idx_annotation_schemas_org", "organization_id"),)
+    __table_args__ = (
+        Index("idx_annotation_schemas_org", "organization_id"),
+        UniqueConstraint("organization_id", "name", "version", name="uq_annotation_schemas_org_name_version"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(

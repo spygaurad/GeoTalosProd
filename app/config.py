@@ -5,14 +5,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Application settings loaded from environment."""
 
-    APP_DATABASE_URL: str  # required — set via APP_DATABASE_URL env var; no default to prevent silent weak-credential connections
+    APP_DATABASE_URL: str  # required — no default to prevent silent weak-credential connections
     LOG_LEVEL: str = "INFO"
     # Keep explicit list for readable local-dev defaults. Tighten in deployed environments.
     BACKEND_CORS_ORIGINS: list[str] = Field(default_factory=lambda: ["*"])
 
     ENVIRONMENT: str = "development"
 
-    # Clerk — "Frontend API" domain from Clerk Dashboard → API Keys
+    # ── Clerk ─────────────────────────────────────────────────────────────────
+    # "Frontend API" domain from Clerk Dashboard → API Keys
     # e.g. "happy-fox-42.clerk.accounts.dev"
     CLERK_FRONTEND_API: str = ""
     CLERK_SECRET_KEY: str = ""
@@ -21,6 +22,34 @@ class Settings(BaseSettings):
     # Shared secret between Next.js webhook relay and this backend.
     # Generate: python -c "import secrets; print(secrets.token_hex(32))"
     INTERNAL_API_KEY: str = ""
+
+    # ── STAC Catalog DB ───────────────────────────────────────────────────────
+    # Write path — pgstac_ingest role (asyncpg)
+    STAC_DATABASE_URL: str = ""
+    # Read-only pool — pgstac_read role (asyncpg)
+    STAC_READ_URL: str = ""
+
+    # ── Celery / Redis ────────────────────────────────────────────────────────
+    # Sync psycopg2 connection for Celery workers (BYPASSRLS role).
+    # Never use this URL in API-facing code paths.
+    CELERY_DATABASE_URL: str = ""
+    # Broker and result backend
+    REDIS_URL: str = ""
+
+    # ── Object storage (MinIO in dev, S3 in prod) ─────────────────────────────
+    # Internal endpoint used by the API container and Celery workers
+    AWS_ENDPOINT_URL: str = ""
+    AWS_REGION: str = "us-east-1"
+    # Credentials — mapped from MINIO_ROOT_USER/PASSWORD by docker-compose
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    # Path-style is required for MinIO; set to False for virtual-hosted AWS S3
+    AWS_S3_FORCE_PATH_STYLE: bool = True
+    # Bucket name prefix: full bucket = f"{S3_BUCKET_PREFIX}{org_id}"
+    S3_BUCKET_PREFIX: str = "org-"
+    # Public URL used in presigned URLs returned to browsers.
+    # Must be reachable from the browser, not the container network.
+    PUBLIC_MINIO_URL: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

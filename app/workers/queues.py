@@ -1,0 +1,6 @@
+INGESTION = "ingestion"
+BULK      = "bulk"
+INFERENCE = "inference"
+ANALYSIS  = "analysis"
+DISCOVERY = "discovery"
+DEFAULT   = "default"

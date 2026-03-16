@@ -9,5 +9,8 @@ next_steps.txt
 __pycache__/
 *.pyc
 
+.pytest_cache/
+.ipynb_checkpoints/
+
 combine_code.py
 combine_code.py.save

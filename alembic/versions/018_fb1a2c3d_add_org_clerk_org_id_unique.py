@@ -14,10 +14,23 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.create_unique_constraint(
-        "uq_organizations_clerk_org_id",
-        "organizations",
-        ["clerk_org_id"],
+    # Migration 002 already creates this constraint via create_table().
+    # This migration was a backfill for databases that predated 002's
+    # UniqueConstraint — on a fresh install it must be skipped.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uq_organizations_clerk_org_id'
+            ) THEN
+                ALTER TABLE organizations
+                    ADD CONSTRAINT uq_organizations_clerk_org_id UNIQUE (clerk_org_id);
+            END IF;
+        END;
+        $$;
+        """
     )
 
 

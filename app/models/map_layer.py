@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -10,7 +10,17 @@ from app.db.base import Base
 
 class MapLayer(Base):
     __tablename__ = "map_layers"
-    __table_args__ = (Index("idx_map_layers_map", "map_id"),)
+    __table_args__ = (
+        Index("idx_map_layers_map", "map_id"),
+        Index("idx_map_layers_dataset", "dataset_id"),
+        Index("idx_map_layers_style", "style_id"),
+        CheckConstraint(
+            "(source_type = 'dataset' AND dataset_id IS NOT NULL AND stac_item_id IS NULL AND tile_service_url IS NULL) OR "
+            "(source_type = 'stac_item' AND stac_item_id IS NOT NULL AND dataset_id IS NULL AND tile_service_url IS NULL) OR "
+            "(source_type = 'tile_service' AND tile_service_url IS NOT NULL AND dataset_id IS NULL AND stac_item_id IS NULL)",
+            name="ck_map_layers_source",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     map_id: Mapped[uuid.UUID] = mapped_column(

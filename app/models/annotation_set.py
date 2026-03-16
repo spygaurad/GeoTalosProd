@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -10,7 +10,19 @@ from app.db.base import Base
 
 class AnnotationSet(Base):
     __tablename__ = "annotation_sets"
-    __table_args__ = (Index("idx_annotation_sets_map", "map_id"),)
+    __table_args__ = (
+        Index("idx_annotation_sets_map", "map_id"),
+        Index("idx_annotation_sets_schema", "schema_id"),
+        Index("idx_annotation_sets_dataset", "dataset_id"),
+        Index("idx_annotation_sets_stac_item", "stac_item_id"),
+        Index("idx_annotation_sets_created_by_user", "created_by_user_id"),
+        Index("idx_annotation_sets_created_by_job", "created_by_job_id"),
+        CheckConstraint(
+            "(created_by_user_id IS NOT NULL AND created_by_job_id IS NULL) OR "
+            "(created_by_user_id IS NULL AND created_by_job_id IS NOT NULL)",
+            name="ck_annotation_sets_creator",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     map_id: Mapped[uuid.UUID] = mapped_column(

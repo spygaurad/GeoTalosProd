@@ -1,0 +1,72 @@
+# =============================================================================
+# Martin vector tile server configuration
+# https://maplibre.org/martin/config-file.html
+#
+# Martin connects to app-db with the martin_reader role (SELECT-only,
+# BYPASSRLS).  It serves PostGIS geometry columns as Mapbox Vector Tiles.
+#
+# DATABASE_URL is injected by docker-compose from the MARTIN_READER_PASSWORD
+# environment variable — this file controls *which* tables are exposed and
+# how, not the connection credentials.
+# =============================================================================
+
+# Worker threads — 0 = one per CPU core
+worker_processes: 0
+
+# HTTP keep-alive timeout in seconds
+keep_alive: 75
+
+# PostGIS sources — explicit list prevents accidental exposure of system
+# tables, audit logs, or tables with no geometry.
+postgres:
+  # Connection string is overridden by the DATABASE_URL env var at runtime.
+  # Listed here only as documentation of the expected format.
+  # connection_string: "postgresql://martin_reader:<password>@app-db:5432/geoplat"
+
+  # Maximum pool size per worker
+  pool_size: 5
+
+  # Tables to expose as vector tile sources.
+  # Each entry maps to a tile source at /martin/<source_id>/{z}/{x}/{y}
+  tables:
+    # Annotation geometries — used for rendering labelled features on the map
+    annotations:
+      schema: public
+      table: annotations
+      srid: 4326
+      geometry_column: geometry
+      geometry_type: Geometry
+      # Columns to include in tile properties (exclude sensitive/internal fields)
+      properties:
+        - id
+        - annotation_set_id
+        - class_id
+        - confidence
+        - deleted_at
+
+    # Dataset spatial extents — used for rendering dataset coverage on the map
+    datasets:
+      schema: public
+      table: datasets
+      srid: 4326
+      geometry_column: spatial_extent
+      geometry_type: Polygon
+      properties:
+        - id
+        - organization_id
+        - name
+        - status
+
+    # Map layer geometries (if any map layers have spatial extent columns)
+    map_layers:
+      schema: public
+      table: map_layers
+      srid: 4326
+      geometry_column: spatial_extent
+      geometry_type: Geometry
+      properties:
+        - id
+        - map_id
+        - name
+        - layer_type
+        - visible

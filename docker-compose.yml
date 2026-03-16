@@ -65,6 +65,9 @@ x-app-env: &app-env
   # set this to "false" (virtual-hosted style) for most regions.
   AWS_S3_FORCE_PATH_STYLE: "true"
   S3_BUCKET_PREFIX: ${S3_BUCKET_PREFIX:-org-}
+  # Public MinIO URL used in presigned URLs returned to browsers.
+  # Must be reachable from the browser, not the container network.
+  PUBLIC_MINIO_URL: ${PUBLIC_MINIO_URL:-http://localhost:9002}
   # Auth
   CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
   CLERK_WEBHOOK_SECRET: ${CLERK_WEBHOOK_SECRET:-}
@@ -555,8 +558,10 @@ services:
       # Never use celery_worker here — it has write access and BYPASSRLS.
       DATABASE_URL: postgresql://martin_reader:${MARTIN_READER_PASSWORD:-martin_pass}@app-db:5432/geoplat
       PORT: 3000
-      # Optional: Enable watch mode to auto-discover new tables/functions without restarting
-      # WATCH_MODE: "true"
+    # Explicit config — prevents auto-discovery from exposing unintended tables.
+    command: --config /config.yaml
+    volumes:
+      - ./infra/docker/martin/config.yaml:/config.yaml:ro
     ports:
       - "${MARTIN_PORT:-3000}:3000"
     depends_on:

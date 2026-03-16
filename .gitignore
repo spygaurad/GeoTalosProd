@@ -8,6 +8,7 @@ next_steps.txt
 
 __pycache__/
 *.pyc
+.gitkeep
 
 .pytest_cache/
 .ipynb_checkpoints/

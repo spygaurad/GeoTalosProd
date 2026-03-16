@@ -33,7 +33,11 @@ async def set_rls_context(session: AsyncSession, request: Request) -> None:
                 {"cid": clerk_org_id},
             )
         ).fetchone()
-        org_uuid = str(row[0]) if row else ""
+        # Use the nil UUID when the org is not found so that the ::uuid cast
+        # in RLS policy expressions never raises an error.  No real org has
+        # this ID, so the comparison will evaluate to FALSE and all rows will
+        # be filtered — the correct behaviour for an unresolved org context.
+        org_uuid = str(row[0]) if row else "00000000-0000-0000-0000-000000000000"
         request.state.org_uuid = org_uuid
 
     await session.execute(

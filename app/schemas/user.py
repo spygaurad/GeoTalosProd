@@ -29,5 +29,4 @@ class UserRead(ORMModel):
     updated_at: datetime
 
 
-class UserListResponse(PaginatedResponse):
-    items: list[UserRead]
+UserListResponse = PaginatedResponse[UserRead]

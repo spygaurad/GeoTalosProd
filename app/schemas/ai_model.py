@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, computed_field
 
 from app.schemas.common import ORMModel, PaginatedResponse
 
@@ -34,7 +34,6 @@ class AIModelUpdate(ORMModel):
     input_schema: dict | None = None
     output_schema: dict | None = None
     config: dict | None = None
-    deleted_at: datetime | None = None
 
 
 class AIModelRead(ORMModel):
@@ -47,7 +46,8 @@ class AIModelRead(ORMModel):
     type: str | None
     endpoint_url: str | None
     request_config: dict | None
-    auth_config: dict | None
+    # auth_config is intentionally excluded from responses; presence is surfaced via has_auth_config
+    auth_config: dict | None = Field(default=None, exclude=True)
     input_schema: dict | None
     output_schema: dict | None
     config: dict | None
@@ -56,6 +56,10 @@ class AIModelRead(ORMModel):
     updated_at: datetime
     deleted_at: datetime | None
 
+    @computed_field
+    @property
+    def has_auth_config(self) -> bool:
+        return self.auth_config is not None
 
-class AIModelListResponse(PaginatedResponse):
-    items: list[AIModelRead]
+
+AIModelListResponse = PaginatedResponse[AIModelRead]

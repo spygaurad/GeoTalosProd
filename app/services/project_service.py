@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -23,8 +24,8 @@ class ProjectService:
         offset: int,
         organization_id: UUID | None = None,
     ) -> tuple[Sequence[Project], int]:
-        query = select(Project)
-        count_query = select(func.count()).select_from(Project)
+        query = select(Project).where(Project.deleted_at.is_(None))
+        count_query = select(func.count()).select_from(Project).where(Project.deleted_at.is_(None))
 
         if organization_id is not None:
             query = query.where(Project.organization_id == organization_id)
@@ -58,8 +59,10 @@ class ProjectService:
             raise not_found("Project")
         return project
 
-    async def create_project(self, payload: ProjectCreate) -> Project:
-        project = Project(**payload.model_dump())
+    async def create_project(self, payload: ProjectCreate, created_by: UUID | None = None) -> Project:
+        data = payload.model_dump()
+        data["created_by"] = created_by
+        project = Project(**data)
         self.db.add(project)
         try:
             await self.db.commit()
@@ -96,6 +99,6 @@ class ProjectService:
 
     async def delete_project(self, project_id: UUID, organization_id: UUID | None = None) -> None:
         project = await self.get_project(project_id, organization_id=organization_id)
-        await self.db.delete(project)
+        project.deleted_at = datetime.now(UTC).replace(tzinfo=None)
         await self.db.commit()
         logger.info("delete_project_success project_id=%s", project_id)

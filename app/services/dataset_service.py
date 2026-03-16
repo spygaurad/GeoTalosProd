@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -8,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import conflict, not_found
 from app.core.geometry import parse_geometry
+from app.core.ranges import parse_tstzrange
 from app.models.dataset import Dataset
 from app.schemas.dataset import DatasetCreate, DatasetUpdate
 
@@ -24,8 +26,8 @@ class DatasetService:
         offset: int,
         organization_id: UUID | None = None,
     ) -> tuple[Sequence[Dataset], int]:
-        query = select(Dataset)
-        count_query = select(func.count()).select_from(Dataset)
+        query = select(Dataset).where(Dataset.deleted_at.is_(None))
+        count_query = select(func.count()).select_from(Dataset).where(Dataset.deleted_at.is_(None))
 
         if organization_id is not None:
             query = query.where(Dataset.organization_id == organization_id)
@@ -60,11 +62,11 @@ class DatasetService:
         return dataset
 
     async def create_dataset(self, payload: DatasetCreate) -> Dataset:
-        data = payload.model_dump()
-        if "metadata" in data:
-            data["metadata_"] = data.pop("metadata")
+        data = payload.model_dump_db()
         if data.get("geometry") is not None:
             data["geometry"] = parse_geometry(data["geometry"])
+        if "temporal_extent" in data:
+            data["temporal_extent"] = parse_tstzrange(data["temporal_extent"])
         dataset = Dataset(**data)
         self.db.add(dataset)
         try:
@@ -81,12 +83,12 @@ class DatasetService:
         self, dataset_id: UUID, payload: DatasetUpdate, organization_id: UUID | None = None
     ) -> Dataset:
         dataset = await self.get_dataset(dataset_id, organization_id=organization_id)
-        data = payload.model_dump(exclude_unset=True)
+        data = payload.model_dump_db(exclude_unset=True)
 
         if "geometry" in data:
             data["geometry"] = parse_geometry(data["geometry"])
-        if "metadata" in data:
-            data["metadata_"] = data.pop("metadata")
+        if "temporal_extent" in data:
+            data["temporal_extent"] = parse_tstzrange(data["temporal_extent"])
 
         for key, value in data.items():
             setattr(dataset, key, value)
@@ -103,6 +105,6 @@ class DatasetService:
 
     async def delete_dataset(self, dataset_id: UUID, organization_id: UUID | None = None) -> None:
         dataset = await self.get_dataset(dataset_id, organization_id=organization_id)
-        await self.db.delete(dataset)
+        dataset.deleted_at = datetime.now(UTC).replace(tzinfo=None)
         await self.db.commit()
         logger.info("delete_dataset_success dataset_id=%s", dataset_id)

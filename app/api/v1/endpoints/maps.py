@@ -56,7 +56,7 @@ async def create_map(
     if project.organization_id != org_id:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     service = MapService(db)
-    map_row = await service.create_map(payload)
+    map_row = await service.create_map(payload, created_by=current_user.id)
     await log_audit_event(
         action="maps.create",
         actor_id=str(current_user.id),

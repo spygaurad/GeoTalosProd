@@ -54,7 +54,7 @@ async def create_project(
     if payload.organization_id != org_id:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     service = ProjectService(db)
-    project = await service.create_project(payload)
+    project = await service.create_project(payload, created_by=current_user.id)
     await log_audit_event(
         action="projects.create",
         actor_id=str(current_user.id),

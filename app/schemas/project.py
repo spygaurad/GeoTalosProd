@@ -10,14 +10,12 @@ class ProjectCreate(ORMModel):
     organization_id: UUID
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
-    created_by: UUID | None = None
 
 
 class ProjectUpdate(ORMModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     created_by: UUID | None = None
-    deleted_at: datetime | None = None
 
 
 class ProjectRead(ORMModel):
@@ -31,5 +29,4 @@ class ProjectRead(ORMModel):
     deleted_at: datetime | None
 
 
-class ProjectListResponse(PaginatedResponse):
-    items: list[ProjectRead]
+ProjectListResponse = PaginatedResponse[ProjectRead]

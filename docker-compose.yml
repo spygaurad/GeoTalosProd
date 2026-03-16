@@ -4,10 +4,10 @@
 #
 # SERVICES
 # ────────
-#  Databases  : app-db  (PostgreSQL 15 + PostGIS 3.3)
-#               stac-db (pgSTAC v0.9.6)
-#  STAC layer : stac-api (stac-fastapi-pgstac 5.0.2)
-#               titiler  (titiler-pgstac 1.7.2)
+#  Databases  : app-db  (PostgreSQL 17 + PostGIS 3.5)
+#               stac-db (pgSTAC v0.9.10)
+#  STAC layer : stac-api (stac-fastapi-pgstac 6.2.2)
+#               titiler  (titiler-pgstac 2.1.0)
 #  Broker     : redis    (Redis 7.2)
 #  Storage    : minio    (S3-compatible)
 #               minio-setup (one-shot bucket initialisation)
@@ -22,9 +22,9 @@
 #
 # NETWORKS
 # ────────
-#  awakeforest-backend  — app-db · redis · api · all workers · beat · flower
-#  awakeforest-stac     — stac-db · stac-api · titiler · api · ingestion worker
-#  awakeforest-storage  — minio · titiler · api · ingestion/bulk/inference workers
+#  awakeforest-backend  — app-db · redis · api · all workers · beat · flower · martin
+#  awakeforest-stac     — stac-db · stac-api · titiler · api · ingestion/analysis workers
+#  awakeforest-storage  — minio · titiler · api · ingestion/bulk/analysis/inference workers
 #
 # QUICK START
 # ───────────
@@ -61,6 +61,8 @@ x-app-env: &app-env
   AWS_REGION: ${AWS_REGION:-us-east-1}
   AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
   AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
+  # Path-style is required for MinIO. When migrating to AWS S3 in production,
+  # set this to "false" (virtual-hosted style) for most regions.
   AWS_S3_FORCE_PATH_STYLE: "true"
   S3_BUCKET_PREFIX: ${S3_BUCKET_PREFIX:-org-}
   # Auth
@@ -81,7 +83,7 @@ services:
   # ============================================================================
 
   app-db:
-    image: postgis/postgis:15-3.3
+    image: postgis/postgis:17-3.5
     container_name: awakeforest-app-db
     restart: unless-stopped
     environment:
@@ -91,9 +93,12 @@ services:
       # Passed through to the init script so it can set role passwords
       APP_USER_PASSWORD: ${APP_USER_PASSWORD:-app_pass}
       CELERY_WORKER_PASSWORD: ${CELERY_WORKER_PASSWORD:-celery_pass}
+      MARTIN_READER_PASSWORD: ${MARTIN_READER_PASSWORD:-martin_pass}
     volumes:
       - app-db-data:/var/lib/postgresql/data
       - ./infra/docker/app-db/init:/docker-entrypoint-initdb.d:ro
+      - ./infra/docker/app-db/config/postgresql.custom.conf:/etc/postgresql/postgresql.conf:ro
+    command: postgres -c 'config_file=/etc/postgresql/postgresql.conf'
     ports:
       - "${APP_DB_PORT:-5432}:5432"
     healthcheck:
@@ -109,9 +114,7 @@ services:
       com.awakeforest.role: database
 
   stac-db:
-    # pgSTAC v0.9.6 — PostgreSQL 15 + PostGIS + pgSTAC schema pre-installed
-    # Source: ghcr.io/stac-utils/pgstac  (mirrors eoAPI reference setup)
-    image: ghcr.io/stac-utils/pgstac:v0.9.6
+    image: ghcr.io/stac-utils/pgstac:v0.9.10
     container_name: awakeforest-stac-db
     restart: unless-stopped
     environment:
@@ -133,8 +136,10 @@ services:
       test: ["CMD-SHELL", "pg_isready -U postgres -d pgstac"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 30s
+      retries: 8
+      # pgSTAC schema migration runs on first start and can be slow on low-spec
+      # hardware — 60 s gives the planner time to finish before dependants start.
+      start_period: 60s
     networks:
       - awakeforest-stac
     labels:
@@ -146,8 +151,8 @@ services:
   # ============================================================================
 
   stac-api:
-    # stac-fastapi-pgstac 5.0.2 — matches eoAPI reference
-    image: ghcr.io/stac-utils/stac-fastapi-pgstac:5.0.2
+    # stac-fastapi-pgstac 6.2.2
+    image: ghcr.io/stac-utils/stac-fastapi-pgstac:6.2.2
     container_name: awakeforest-stac-api
     restart: unless-stopped
     environment:
@@ -157,11 +162,11 @@ services:
       POSTGRES_HOST_READER: stac-db
       POSTGRES_HOST_WRITER: stac-db
       POSTGRES_PORT: 5432
-      DB_MIN_CONN_SIZE: 1
-      DB_MAX_CONN_SIZE: 10
+      DB_MIN_CONN_SIZE: ${STAC_API_DB_MIN_CONN:-1}
+      DB_MAX_CONN_SIZE: ${STAC_API_DB_MAX_CONN:-10}
       USE_API_HYDRATE: "false"
       ENABLE_DIRECT_RESPONSE: "true"
-      WEB_CONCURRENCY: 2
+      WEB_CONCURRENCY: ${STAC_API_WEB_CONCURRENCY:-2}
     ports:
       - "${STAC_API_PORT:-8081}:8080"
     depends_on:
@@ -176,7 +181,7 @@ services:
   titiler:
     # titiler-pgstac 1.7.2 — matches eoAPI reference
     # Forced to linux/amd64 for GDAL native lib compatibility on ARM hosts
-    image: ghcr.io/stac-utils/titiler-pgstac:1.7.2
+    image: ghcr.io/stac-utils/titiler-pgstac:2.1.0
     platform: linux/amd64
     container_name: awakeforest-titiler
     restart: unless-stopped
@@ -186,20 +191,20 @@ services:
       POSTGRES_DBNAME: pgstac
       POSTGRES_HOST: stac-db
       POSTGRES_PORT: 5432
-      DB_MIN_CONN_SIZE: 1
-      DB_MAX_CONN_SIZE: 5
-      MOSAIC_CONCURRENCY: 4
+      DB_MIN_CONN_SIZE: ${TITILER_DB_MIN_CONN:-1}
+      DB_MAX_CONN_SIZE: ${TITILER_DB_MAX_CONN:-5}
+      MOSAIC_CONCURRENCY: ${TITILER_MOSAIC_CONCURRENCY:-4}
       # GDAL performance tuning
       CPL_TMPDIR: /tmp
-      GDAL_CACHEMAX: 512
+      GDAL_CACHEMAX: ${GDAL_CACHEMAX:-512}
       GDAL_INGESTED_BYTES_AT_OPEN: 32768
       GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
       GDAL_HTTP_MERGE_CONSECUTIVE_RANGES: "YES"
       GDAL_HTTP_MULTIPLEX: "YES"
       GDAL_HTTP_VERSION: "2"
       VSI_CACHE: "TRUE"
-      VSI_CACHE_SIZE: "536870912"   # 512 MB
-      CPL_VSIL_CURL_CACHE_SIZE: "200000000"
+      VSI_CACHE_SIZE: "${VSI_CACHE_SIZE:-536870912}"
+      CPL_VSIL_CURL_CACHE_SIZE: "${CPL_VSIL_CURL_CACHE_SIZE:-200000000}"
       # MinIO/S3 access for reading original files
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
@@ -268,8 +273,8 @@ services:
     volumes:
       - minio-data:/data
     ports:
-      - "${MINIO_API_PORT:-9002}:9000"     # S3 API
-      - "${MINIO_CONSOLE_PORT:-9002}:9001" # Web console
+      - "${MINIO_API_PORT:-9000}:9000"     # S3 API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001" # Web console
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
       interval: 15s
@@ -357,7 +362,7 @@ services:
       celery -A app.workers.celery_app worker
       --loglevel=${LOG_LEVEL:-INFO}
       --queues=ingestion,discovery
-      --concurrency=4
+      --concurrency=${WORKER_CONCURRENCY_INGESTION:-4}
       --hostname=ingestion@%h
     depends_on:
       app-db:
@@ -365,6 +370,8 @@ services:
       stac-db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     networks:
       - awakeforest-backend
@@ -385,12 +392,14 @@ services:
       celery -A app.workers.celery_app worker
       --loglevel=${LOG_LEVEL:-INFO}
       --queues=bulk
-      --concurrency=4
+      --concurrency=${WORKER_CONCURRENCY_BULK:-4}
       --hostname=bulk@%h
     depends_on:
       app-db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     networks:
       - awakeforest-backend
@@ -402,6 +411,7 @@ services:
   celery-worker-analysis:
     # Queues: analysis
     # Handles: timeseries, change detection, annotation stats refresh
+    # Needs stac-db for STAC item queries and minio for raw raster reads.
     <<: *app-build
     container_name: awakeforest-worker-analysis
     environment:
@@ -410,15 +420,21 @@ services:
       celery -A app.workers.celery_app worker
       --loglevel=${LOG_LEVEL:-INFO}
       --queues=analysis
-      --concurrency=4
+      --concurrency=${WORKER_CONCURRENCY_ANALYSIS:-4}
       --hostname=analysis@%h
     depends_on:
       app-db:
         condition: service_healthy
+      stac-db:
+        condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     networks:
       - awakeforest-backend
+      - awakeforest-stac
+      - awakeforest-storage
     labels:
       com.awakeforest.service: celery-worker-analysis
       com.awakeforest.role: worker
@@ -435,12 +451,14 @@ services:
       celery -A app.workers.celery_app worker
       --loglevel=${LOG_LEVEL:-INFO}
       --queues=inference
-      --concurrency=2
+      --concurrency=${WORKER_CONCURRENCY_INFERENCE:-2}
       --hostname=inference@%h
     depends_on:
       app-db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     networks:
       - awakeforest-backend
@@ -460,7 +478,7 @@ services:
       celery -A app.workers.celery_app worker
       --loglevel=${LOG_LEVEL:-INFO}
       --queues=default
-      --concurrency=2
+      --concurrency=${WORKER_CONCURRENCY_DEFAULT:-2}
       --hostname=default@%h
     depends_on:
       app-db:
@@ -484,9 +502,9 @@ services:
     command: >
       celery -A app.workers.celery_app beat
       --loglevel=${LOG_LEVEL:-INFO}
-      --schedule=/tmp/celerybeat-schedule
+      --schedule=/var/celerybeat/celerybeat-schedule
     volumes:
-      - celerybeat-schedule:/tmp  # persist schedule file across restarts
+      - celerybeat-schedule:/var/celerybeat  # persist schedule file across restarts
     depends_on:
       app-db:
         condition: service_healthy
@@ -524,6 +542,38 @@ services:
       com.awakeforest.service: flower
       com.awakeforest.role: monitoring
 
+  # ============================================================================
+  # VECTOR TILES (Martin)
+  # ============================================================================
+
+  martin:
+    image: ghcr.io/maplibre/martin:1.4.0
+    container_name: awakeforest-martin
+    restart: unless-stopped
+    environment:
+      # Dedicated read-only role (BYPASSRLS, SELECT-only).
+      # Never use celery_worker here — it has write access and BYPASSRLS.
+      DATABASE_URL: postgresql://martin_reader:${MARTIN_READER_PASSWORD:-martin_pass}@app-db:5432/geoplat
+      PORT: 3000
+      # Optional: Enable watch mode to auto-discover new tables/functions without restarting
+      # WATCH_MODE: "true"
+    ports:
+      - "${MARTIN_PORT:-3000}:3000"
+    depends_on:
+      app-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - awakeforest-backend
+    labels:
+      com.awakeforest.service: martin
+      com.awakeforest.role: tile-server
+
 # =============================================================================
 # VOLUMES
 # =============================================================================
@@ -548,15 +598,16 @@ volumes:
 #    app-db · redis · api · all workers · beat · flower
 #
 #  awakeforest-stac     — STAC catalog plane
-#    stac-db · stac-api · titiler · api · ingestion worker
+#    stac-db · stac-api · titiler · api · ingestion worker · analysis worker
 #
 #  awakeforest-storage  — object storage plane
 #    minio · minio-setup · titiler · api
 #    ingestion worker (writes STAC + VRT) · bulk worker (exports)
+#    analysis worker (reads rasters for timeseries / change detection)
 #    inference worker (reads rasters, writes results)
 #
-# Services join only the networks they actually need, so e.g. the analysis
-# worker has no route to minio and the stac-api has no route to redis.
+# Services join only the networks they actually need; the stac-api has no
+# route to redis, and the default worker has no route to minio or stac.
 # =============================================================================
 
 networks:

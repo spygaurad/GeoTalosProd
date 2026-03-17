@@ -15,10 +15,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/poetry/bin:${PATH}"
 
 # System deps — curl for poetry installer, build-essential for any src wheels
+# libexpat1 is required for geospatial libraries (e.g., pyuwsgi, rasterio)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         build-essential \
         libpq-dev \
+        libexpat1 \
         && rm -rf /var/lib/apt/lists/*
 
 # Install Poetry via official installer

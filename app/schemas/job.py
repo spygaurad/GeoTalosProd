@@ -11,6 +11,10 @@ class JobRead(ORMModel):
     status: str
     config: dict | None
     input_refs: list | None
+    processed_items: int
+    total_items: int
+    failed_items: int
+    progress: float | None
     logs: str | None
     started_at: datetime | None
     finished_at: datetime | None

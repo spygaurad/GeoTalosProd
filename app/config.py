@@ -7,10 +7,10 @@ class Settings(BaseSettings):
 
     APP_DATABASE_URL: str  # required — no default to prevent silent weak-credential connections
     LOG_LEVEL: str = "INFO"
-    # Keep explicit list for readable local-dev defaults. Tighten in deployed environments.
+    # Keep explicit list for readable local-dev defaults. Tighten in deployed environments., read from env
     BACKEND_CORS_ORIGINS: list[str] = Field(default_factory=lambda: ["*"])
 
-    ENVIRONMENT: str = "development"
+    ENVIRONMENT: str = ""
 
     # ── Clerk ─────────────────────────────────────────────────────────────────
     # "Frontend API" domain from Clerk Dashboard → API Keys
@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     # responses so browsers call the tile proxy endpoint instead of titiler directly.
     # No trailing slash. Example: https://api.example.com
     PUBLIC_API_URL: str = ""
+    MINIO_CORS_ALLOW_ORIGIN: str = ""
+
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -36,24 +36,13 @@ def _get_client() -> httpx.AsyncClient:
 
 
 async def register_collection_mosaic(collection_id: str) -> str:
-    """Register a pgSTAC mosaic search for a STAC collection.
-
-    Uses a CQL2-JSON filter so only items from this collection are included.
-    Returns the ``searchid`` (opaque string) that titiler-pgstac assigns.
-
-    Calling this multiple times for the same collection is safe — titiler
-    deduplicates by the hash of the search parameters.
-    """
+    """Register a pgSTAC mosaic search for a STAC collection using the collections shorthand."""
     payload = {
-        "filter-lang": "cql2-json",
-        "filter": {
-            "op": "=",
-            "args": [{"property": "collection"}, collection_id],
-        },
-        "metadata": {"collection_id": collection_id},
+        "collections": [collection_id],
+        "metadata": {"collection_id": collection_id}
     }
     client = _get_client()
-    resp = await client.post("/mosaic/register", json=payload)
+    resp = await client.post("/searches/register", json=payload, timeout=30.0)
     if resp.status_code not in (200, 201):
         logger.error(
             "titiler_register_failed collection_id=%s status=%s body=%s",
@@ -63,47 +52,42 @@ async def register_collection_mosaic(collection_id: str) -> str:
         )
         raise RuntimeError(f"TiTiler mosaic registration failed: HTTP {resp.status_code}")
     data = resp.json()
-    searchid: str = data["searchid"]
+    searchid: str = data["id"]
     logger.info("titiler_mosaic_registered collection_id=%s searchid=%s", collection_id, searchid)
     return searchid
-
-
 async def get_mosaic_tilejson(
     searchid: str,
     assets: str | None = None,
     *,
     public_api_url: str | None = None,
 ) -> dict[str, Any]:
-    """Fetch TileJSON for a mosaic and rewrite tile URLs to the API proxy.
-
-    ``assets`` is a comma-separated asset name string (e.g. ``"B04,B03,B02"``).
-    ``public_api_url`` overrides ``settings.PUBLIC_API_URL`` (useful in tests).
-    """
+    """Fetch TileJSON for a mosaic and rewrite tile URLs to the API proxy."""
     params: dict[str, Any] = {}
     if assets:
-        # titiler-pgstac accepts assets as repeated query params
         params["assets"] = assets
 
     client = _get_client()
-    resp = await client.get(f"/mosaic/{searchid}/tilejson.json", params=params)
+    resp = await client.get(f"/searches/{searchid}/tilejson.json", params=params)
+
     if resp.status_code == 404:
-        raise RuntimeError(f"TiTiler mosaic not found: {searchid}")
+        raise RuntimeError(
+            f"TiTiler search {searchid!r} returned no items for this collection. "
+            "The collection may be empty or pgstac_read may lack permissions on the "
+            "collection's item partition — re-run stac-db-migrate and re-ingest."
+        )
+
     if resp.status_code != 200:
         raise RuntimeError(f"TiTiler tilejson failed: HTTP {resp.status_code}")
 
     tilejson: dict[str, Any] = resp.json()
     base = (public_api_url or settings.PUBLIC_API_URL).rstrip("/")
 
-    # Rewrite every tile URL template.
-    # titiler internal URL pattern:  http://titiler:8000/mosaic/{searchid}/{z}/{x}/{y}.{fmt}?...
-    # Proxy URL pattern:             {PUBLIC_API_URL}/api/v1/tiles/mosaic/{searchid}/{z}/{x}/{y}.{fmt}?...
     rewritten = []
     for url in tilejson.get("tiles", []):
         rewritten.append(_rewrite_mosaic_tile_url(url, searchid, base))
     tilejson["tiles"] = rewritten
 
     return tilejson
-
 
 async def get_stac_item_tilejson(
     item_url: str,
@@ -143,7 +127,7 @@ def _rewrite_mosaic_tile_url(original: str, searchid: str, base: str) -> str:
     """Replace the titiler host+path prefix with the proxy endpoint."""
     # Strip everything up to and including /mosaic/{searchid}
     # then prefix with the proxy base path.
-    match = re.search(r"/mosaic/[^/]+(/.*)", original)
+    match = re.search(r"/searches/[^/]+(/.*)", original)
     if match:
         suffix = match.group(1)  # e.g.  /{z}/{x}/{y}.png?assets=B04
         return f"{base}/api/v1/tiles/mosaic/{searchid}{suffix}"

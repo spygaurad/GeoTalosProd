@@ -60,52 +60,68 @@ def _extract_datetime(tags: dict, filename: str) -> str:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def validate_cog(s3_uri: str, s3_config: dict) -> tuple[bool, list[str]]:
-    """Validate that the file at *s3_uri* is a well-formed COG.
+    """Validate that the file at *s3_uri* can be ingested as a raster.
 
-    Checks performed:
-    - File opens without error via GDAL VSI
-    - At least one band has block (tile) dimensions ≤ 512 px
-    - At least one overview level is present
-    - Compression is set
+    Hard failures (returns False — file is rejected):
+    - File cannot be opened via GDAL VSI
+    - File has no raster bands
 
-    Returns ``(is_valid, issues)`` where *issues* is a list of human-readable
-    problem descriptions (empty when *is_valid* is True).
+    Soft warnings (returns True with non-empty issues — file is ingested
+    but the issues are logged so operators know it is not COG-optimised):
+    - No block (tile) structure (non-tiled TIFF)
+    - Block size > 512 px
+    - No overview levels (tiles will be slow at low zoom)
+    - No compression (file will be large in storage)
+
+    This follows industry practice: accept any valid GeoTIFF for ingestion,
+    but flag files that are not Cloud Optimized so they can be re-uploaded
+    as COGs for better tile performance.
+
+    Returns ``(is_valid, issues)`` where *issues* lists all problems found.
+    *is_valid* is False only on hard failures.
     """
     import rasterio
     from rasterio.env import Env
 
     vsi = _vsi_path(s3_uri)
     issues: list[str] = []
+    hard_failure = False
 
     with Env(**s3_config):
         try:
             with rasterio.open(vsi) as src:
-                # Tiling: block shapes should be set and ≤ 512
-                block_shapes = src.block_shapes
-                if not block_shapes or all(bs is None for bs in block_shapes):
-                    issues.append("File has no block (tile) structure — not a COG")
+                if not src.indexes:
+                    issues.append("File has no raster bands")
+                    hard_failure = True
+                elif src.crs is None:
+                    issues.append("File has no coordinate reference system — not a valid georeferenced raster")
+                    hard_failure = True
                 else:
-                    for bs in block_shapes:
-                        if bs is not None and (bs[0] > 512 or bs[1] > 512):
-                            issues.append(
-                                f"Block size {bs} is larger than 512 px — "
-                                "consider retiling with block_size=256 or 512"
-                            )
-                            break
+                    # Soft: tiling
+                    block_shapes = src.block_shapes
+                    if not block_shapes or all(bs is None for bs in block_shapes):
+                        issues.append("No tile block structure — not COG-optimised (will render slowly)")
+                    else:
+                        for bs in block_shapes:
+                            if bs is not None and (bs[0] > 512 or bs[1] > 512):
+                                issues.append(
+                                    f"Block size {bs} > 512 px — consider retiling at 256 or 512"
+                                )
+                                break
 
-                # Overviews
-                has_overviews = any(src.overviews(i) for i in src.indexes)
-                if not has_overviews:
-                    issues.append("No overview levels — tile rendering will be slow at low zoom")
+                    # Soft: overviews
+                    if not any(src.overviews(i) for i in src.indexes):
+                        issues.append("No overview levels — low-zoom tiles will be slow")
 
-                # Compression
-                if src.profile.get("compress") is None:
-                    issues.append("No compression set — file will be unnecessarily large")
+                    # Soft: compression
+                    if src.profile.get("compress") is None:
+                        issues.append("No compression — storage size will be larger than necessary")
 
         except Exception as exc:
             issues.append(f"Could not open file: {exc}")
+            hard_failure = True
 
-    return len(issues) == 0, issues
+    return not hard_failure, issues
 
 
 def extract_cog_metadata(s3_uri: str, s3_config: dict) -> dict:
@@ -210,6 +226,10 @@ def build_stac_item(
             "gsd": metadata.get("gsd_meters"),
             "proj:epsg": _epsg_code(metadata.get("native_crs")),
             "proj:shape": [metadata.get("height"), metadata.get("width")],
+            "native_crs": metadata.get("native_crs"),
+            "file_size_bytes": metadata.get("file_size_bytes"),
+            # Store band dtypes as a flat list for collection-level aggregation
+            "bands": [b["dtype"] for b in metadata.get("bands", [])],
         },
         "assets": {
             "data": {

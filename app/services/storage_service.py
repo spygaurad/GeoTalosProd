@@ -10,6 +10,7 @@ clients upload directly to MinIO via the presigned URLs returned here.
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 import boto3
@@ -62,8 +63,39 @@ def object_key(dataset_id: uuid.UUID, filename: str) -> str:
 
 # ── Bucket management ─────────────────────────────────────────────────────────
 
+def _apply_bucket_cors(client: boto3.client, name: str) -> None:
+    """Apply a CORS policy that allows browsers to PUT parts directly."""
+    
+    # Ensure allowed_origins is always a list of strings
+    raw_origin = settings.MINIO_CORS_ALLOW_ORIGIN
+    if not raw_origin:
+        allowed_origins = ["*"]
+    elif isinstance(raw_origin, str):
+        # Split by comma if you have multiple origins, otherwise wrap in list
+        allowed_origins = [o.strip() for o in raw_origin.split(",")]
+    else:
+        allowed_origins = list(raw_origin)
+
+    client.put_bucket_cors(
+        Bucket=name,
+        CORSConfiguration={
+            "CORSRules": [
+                {
+                    "AllowedHeaders": ["*"],
+                    "AllowedMethods": ["GET", "PUT", "HEAD"],
+                    "AllowedOrigins": allowed_origins,  # Must be a list
+                    "ExposeHeaders": ["ETag"],
+                    "MaxAgeSeconds": 3600,
+                }
+            ]
+        },
+    )
+
+_log = logging.getLogger(__name__)
+
+
 def ensure_org_bucket(org_id: uuid.UUID) -> None:
-    """Create the org bucket if it does not exist. Idempotent."""
+    """Create the org bucket if it does not exist, and ensure CORS is set. Idempotent."""
     client = _s3_client()
     name = bucket_name(org_id)
     try:
@@ -74,11 +106,30 @@ def ensure_org_bucket(org_id: uuid.UUID) -> None:
             client.create_bucket(Bucket=name)
         else:
             raise
+    try:
+        _apply_bucket_cors(client, name)
+    except ClientError as exc:
+        # Some MinIO builds return NotImplemented for PutBucketCors.
+        # CORS can also be configured via `mc cors set` in the minio-setup
+        # container.  Log a warning and continue — bucket creation must not
+        # be blocked by a CORS API limitation.
+        _log.warning(
+            "bucket_cors_set_failed bucket=%s code=%s — "
+            "browser uploads may fail cross-origin; "
+            "configure CORS via `mc cors set` on the MinIO server",
+            name,
+            exc.response["Error"].get("Code", "unknown"),
+        )
 
 
 # ── Multipart upload lifecycle ────────────────────────────────────────────────
 
-def initiate_upload(org_id: uuid.UUID, dataset_id: uuid.UUID, filename: str) -> tuple[str, str]:
+def initiate_upload(
+    org_id: uuid.UUID,
+    dataset_id: uuid.UUID,
+    filename: str,
+    content_type: str = "image/tiff",
+) -> tuple[str, str]:
     """Start a multipart upload.
 
     Returns ``(s3_key, upload_id)``.  The caller stores both on the Job
@@ -89,9 +140,24 @@ def initiate_upload(org_id: uuid.UUID, dataset_id: uuid.UUID, filename: str) -> 
     resp = client.create_multipart_upload(
         Bucket=bucket_name(org_id),
         Key=key,
-        ContentType="image/tiff",
+        ContentType=content_type,
     )
     return key, resp["UploadId"]
+
+
+def upload_from_path(org_id: uuid.UUID, s3_key: str, file_path: str, content_type: str = "image/tiff") -> None:
+    """Upload a local file to S3/MinIO as a single PUT (used by Celery workers).
+
+    Uses the internal endpoint — not for generating URLs the browser will hit.
+    """
+    client = _s3_client()
+    with open(file_path, "rb") as fobj:
+        client.upload_fileobj(
+            fobj,
+            bucket_name(org_id),
+            s3_key,
+            ExtraArgs={"ContentType": content_type},
+        )
 
 
 def generate_part_url(

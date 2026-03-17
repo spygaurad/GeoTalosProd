@@ -100,10 +100,8 @@ async def create_dataset(
     db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    if payload.organization_id != org_id:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
     service = DatasetService(db)
-    dataset = await service.create_dataset(payload)
+    dataset = await service.create_dataset(payload, organization_id=org_id)
     await log_audit_event(
         action="datasets.create",
         actor_id=str(current_user.id),
@@ -188,12 +186,17 @@ async def get_dataset_tilejson(
 
     try:
         searchid = await titiler_service.register_collection_mosaic(dataset.stac_collection_id)
-        tilejson = await titiler_service.get_mosaic_tilejson(searchid, assets=assets)
+        tilejson = await titiler_service.get_mosaic_tilejson(
+            searchid,
+            assets=assets,
+        )
     except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Distinguish between mosaic not found (404) and other errors (502)
+        if "not found" in str(exc).lower():
+            raise HTTPException(status_code=404, detail="Mosaic not found, please retry") from exc
+        raise HTTPException(status_code=502, detail=f"Tile service error: {exc}") from exc
 
     return {**tilejson, "dataset_id": str(dataset_id), "searchid": searchid}
-
 
 # ── Upload sub-resources ──────────────────────────────────────────────────────
 
@@ -221,7 +224,7 @@ async def initiate_dataset_upload(
 
     # Initiate MinIO multipart upload
     s3_key, upload_id = await asyncio.to_thread(
-        storage_service.initiate_upload, org_id, dataset_id, payload.filename
+        storage_service.initiate_upload, org_id, dataset_id, payload.filename, payload.content_type
     )
 
     # Create a Job to track the ingestion lifecycle
@@ -326,8 +329,12 @@ async def complete_dataset_upload(
 
     # Import here to avoid circular imports at module load time
     from app.workers.ingestion.tasks import ingest_dataset  # noqa: PLC0415
+    from app.workers.queues import INGESTION  # noqa: PLC0415
 
-    ingest_dataset.apply_async(args=[str(job.id), str(dataset_id), s3_key, filename])
+    ingest_dataset.apply_async(
+        args=[str(job.id), str(dataset_id), s3_key, filename],
+        queue=INGESTION,
+    )
 
     return UploadJobResponse(job_id=job.id)
 

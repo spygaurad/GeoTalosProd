@@ -186,17 +186,65 @@ def generate_part_url(
     )
 
 
+def upload_part(
+    org_id: uuid.UUID,
+    s3_key: str,
+    upload_id: str,
+    part_number: int,
+    data: bytes,
+) -> str:
+    """Upload a single part and return its ETag.
+
+    Used by the API proxy endpoint so the browser never needs to PUT directly
+    to MinIO (avoids MinIO Community's S3 CORS limitation).
+    """
+    client = _s3_client()
+    resp = client.upload_part(
+        Bucket=bucket_name(org_id),
+        Key=s3_key,
+        UploadId=upload_id,
+        PartNumber=part_number,
+        Body=data,
+    )
+    return resp["ETag"]
+
+
+def list_parts(org_id: uuid.UUID, s3_key: str, upload_id: str) -> list[dict]:
+    """Return all uploaded parts as ``{"PartNumber": int, "ETag": str}`` dicts.
+
+    Used when the client cannot read ETags from PUT responses (e.g. MinIO
+    Community edition does not support per-bucket CORS, so
+    Access-Control-Expose-Headers cannot include ETag).
+    """
+    client = _s3_client()
+    name = bucket_name(org_id)
+    parts = []
+    kwargs: dict = {"Bucket": name, "Key": s3_key, "UploadId": upload_id}
+    while True:
+        resp = client.list_parts(**kwargs)
+        for p in resp.get("Parts", []):
+            parts.append({"PartNumber": p["PartNumber"], "ETag": p["ETag"]})
+        if resp.get("IsTruncated"):
+            kwargs["PartNumberMarker"] = resp["NextPartNumberMarker"]
+        else:
+            break
+    return parts
+
+
 def complete_upload(
     org_id: uuid.UUID,
     s3_key: str,
     upload_id: str,
-    parts: list[dict],
+    parts: list[dict] | None = None,
 ) -> None:
     """Complete a multipart upload.
 
-    ``parts`` must be a list of ``{"PartNumber": int, "ETag": str}`` dicts
-    returned by MinIO/S3 after each part was PUT successfully.
+    ``parts`` is a list of ``{"PartNumber": int, "ETag": str}`` dicts.
+    If omitted, the parts are fetched from MinIO via ``list_parts`` — this
+    is the normal path because MinIO Community does not expose ETag via CORS.
     """
+    if not parts:
+        parts = list_parts(org_id, s3_key, upload_id)
     client = _s3_client()
     client.complete_multipart_upload(
         Bucket=bucket_name(org_id),

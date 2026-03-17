@@ -39,10 +39,16 @@ async def register_collection_mosaic(collection_id: str) -> str:
     """Register a pgSTAC mosaic search for a STAC collection using the collections shorthand."""
     payload = {
         "collections": [collection_id],
-        "metadata": {"collection_id": collection_id}
     }
     client = _get_client()
-    resp = await client.post("/searches/register", json=payload, timeout=30.0)
+    try:
+        resp = await client.post("/searches/register", json=payload, timeout=60.0)
+    except httpx.TimeoutException:
+        raise RuntimeError(
+            "TiTiler mosaic registration timed out — service may be starting up, retry in a moment"
+        )
+    except httpx.ConnectError:
+        raise RuntimeError("Cannot reach TiTiler service — check that titiler container is healthy")
     if resp.status_code not in (200, 201):
         logger.error(
             "titiler_register_failed collection_id=%s status=%s body=%s",
@@ -67,7 +73,14 @@ async def get_mosaic_tilejson(
         params["assets"] = assets
 
     client = _get_client()
-    resp = await client.get(f"/searches/{searchid}/tilejson.json", params=params)
+    try:
+        resp = await client.get(f"/searches/{searchid}/WebMercatorQuad/tilejson.json", params=params, timeout=60.0)
+    except httpx.TimeoutException:
+        raise RuntimeError(
+            "TiTiler tilejson timed out — service may be starting up, retry in a moment"
+        )
+    except httpx.ConnectError:
+        raise RuntimeError("Cannot reach TiTiler service — check that titiler container is healthy")
 
     if resp.status_code == 404:
         raise RuntimeError(
@@ -124,13 +137,32 @@ _TITILER_HOST_RE = re.compile(r"^https?://[^/]+")
 
 
 def _rewrite_mosaic_tile_url(original: str, searchid: str, base: str) -> str:
-    """Replace the titiler host+path prefix with the proxy endpoint."""
-    # Strip everything up to and including /mosaic/{searchid}
-    # then prefix with the proxy base path.
-    match = re.search(r"/searches/[^/]+(/.*)", original)
+    """Rewrite a titiler-pgstac tile template URL to go through the API proxy.
+
+    titiler-pgstac returns templates like:
+      http://titiler:8000/searches/{id}/tiles/WebMercatorQuad/{z}/{x}/{y}@1x
+
+    We rewrite to:
+      {base}/api/v1/tiles/mosaic/{searchid}/{z}/{x}/{y}.png
+
+    The @scale suffix (@1x) is dropped — the proxy appends it when forwarding
+    to titiler.  An explicit .png extension is added so MapLibre / Leaflet
+    recognise the URL as a raster tile.
+    """
+    # Match path segment after /tiles/{tileMatrixSetId}/ — stop before query string
+    match = re.search(r"/searches/[^/]+/tiles/[^/]+/([^?]+)", original)
     if match:
-        suffix = match.group(1)  # e.g.  /{z}/{x}/{y}.png?assets=B04
-        return f"{base}/api/v1/tiles/mosaic/{searchid}{suffix}"
+        # zxy_part may be "{z}/{x}/{y}@1x" (template) or "10/512/256@1x.png" (real tile)
+        zxy_part = match.group(1)
+        # Strip @scale suffix (e.g. @1x, @2x) — keep any trailing .ext if present
+        zxy_clean = re.sub(r"@\w+", "", zxy_part)        # "{z}/{x}/{y}" or "10/512/256.png"
+        # Ensure .png extension
+        if not re.search(r"\.\w+$", zxy_clean):
+            zxy_clean = f"{zxy_clean}.png"
+        # Preserve original query string
+        qs_match = re.search(r"\?(.+)$", original)
+        qs = f"?{qs_match.group(1)}" if qs_match else ""
+        return f"{base}/api/v1/tiles/mosaic/{searchid}/{zxy_clean}{qs}"
     # Fallback: just swap the host
     return _TITILER_HOST_RE.sub(f"{base}/api/v1/tiles", original)
 

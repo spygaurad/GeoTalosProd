@@ -2,7 +2,7 @@ import asyncio
 import math
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +38,19 @@ _PART_SIZE_BYTES = 100 * 1024 * 1024
 # Number of presigned part URLs returned in the initiate response.
 # Clients needing more call POST /{id}/uploads/{upload_id}/part-urls.
 _INITIAL_PART_BATCH = 10
+
+
+def _part_proxy_url(dataset_id: UUID, upload_id: str, part_number: int) -> str:
+    """Return the API-proxy URL the browser should PUT a part to.
+
+    Using the API as a proxy avoids MinIO Community's S3 CORS limitation:
+    the browser can't send presigned PUT requests directly to MinIO because
+    MinIO Community does not return Access-Control-Allow-* headers on OPTIONS
+    preflight responses for S3 bucket operations.
+    """
+    from app.config import settings  # noqa: PLC0415
+    base = settings.PUBLIC_API_URL.rstrip("/")
+    return f"{base}/api/v1/datasets/{dataset_id}/uploads/{upload_id}/parts/{part_number}"
 
 
 async def _get_upload_job(
@@ -191,10 +204,14 @@ async def get_dataset_tilejson(
             assets=assets,
         )
     except RuntimeError as exc:
-        # Distinguish between mosaic not found (404) and other errors (502)
-        if "not found" in str(exc).lower():
-            raise HTTPException(status_code=404, detail="Mosaic not found, please retry") from exc
-        raise HTTPException(status_code=502, detail=f"Tile service error: {exc}") from exc
+        msg = str(exc)
+        if "not found" in msg.lower() or "no items" in msg.lower():
+            raise HTTPException(status_code=404, detail=msg) from exc
+        if "timed out" in msg.lower():
+            raise HTTPException(status_code=504, detail=msg) from exc
+        if "cannot reach" in msg.lower():
+            raise HTTPException(status_code=503, detail=msg) from exc
+        raise HTTPException(status_code=502, detail=f"Tile service error: {msg}") from exc
 
     return {**tilejson, "dataset_id": str(dataset_id), "searchid": searchid}
 
@@ -244,21 +261,26 @@ async def initiate_dataset_upload(
     await db.commit()
     await db.refresh(job)
 
-    # Pre-generate the first batch of presigned part URLs
+    # Pre-generate the first batch of part URLs pointing at the API proxy.
+    # We intentionally route through the API rather than generating presigned
+    # MinIO URLs because MinIO Community does not serve CORS headers on S3
+    # OPTIONS preflights, so browsers cannot PUT directly to MinIO.
     total_parts = max(1, math.ceil(payload.file_size_bytes / _PART_SIZE_BYTES))
     first_batch = min(_INITIAL_PART_BATCH, total_parts)
-    part_urls = []
-    for part_number in range(1, first_batch + 1):
-        url = await asyncio.to_thread(
-            storage_service.generate_part_url, org_id, s3_key, upload_id, part_number
+    part_urls = [
+        UploadPartUrl(
+            part_number=n,
+            url=_part_proxy_url(dataset_id, upload_id, n),
         )
-        part_urls.append(UploadPartUrl(part_number=part_number, url=url))
+        for n in range(1, first_batch + 1)
+    ]
 
     return UploadInitiateResponse(
         upload_id=upload_id,
         job_id=job.id,
         s3_key=s3_key,
         part_size_bytes=_PART_SIZE_BYTES,
+        total_parts=total_parts,
         part_urls=part_urls,
     )
 
@@ -272,17 +294,16 @@ async def get_upload_part_urls(
     db: AsyncSession = Depends(get_session),
     _current_user: User = Depends(get_current_user),
 ):
-    """Return presigned PUT URLs for additional parts beyond the initial batch."""
-    job = await _get_upload_job(db, upload_id, org_id, dataset_id)
-    s3_key = job.config["s3_key"]
+    """Return API-proxy PUT URLs for additional parts beyond the initial batch."""
+    await _get_upload_job(db, upload_id, org_id, dataset_id)  # auth/ownership check
 
-    part_urls = []
-    for part_number in payload.part_numbers:
-        url = await asyncio.to_thread(
-            storage_service.generate_part_url, org_id, s3_key, upload_id, part_number
+    part_urls = [
+        UploadPartUrl(
+            part_number=n,
+            url=_part_proxy_url(dataset_id, upload_id, n),
         )
-        part_urls.append(UploadPartUrl(part_number=part_number, url=url))
-
+        for n in payload.part_numbers
+    ]
     return PartUrlsResponse(part_urls=part_urls)
 
 
@@ -309,9 +330,14 @@ async def complete_dataset_upload(
     s3_key = job.config["s3_key"]
     filename = job.config["filename"]
 
-    boto_parts = [
-        {"PartNumber": p.part_number, "ETag": p.etag} for p in payload.parts
-    ]
+    # MinIO Community doesn't support per-bucket CORS, so browsers cannot read
+    # the ETag response header.  Accept an empty/missing parts list and let
+    # storage_service.list_parts fetch them server-side.
+    boto_parts = (
+        [{"PartNumber": p.part_number, "ETag": p.etag} for p in payload.parts]
+        if payload.parts
+        else None
+    )
 
     try:
         await asyncio.to_thread(
@@ -362,3 +388,63 @@ async def abort_dataset_upload(
 
     job.status = JobStatus.CANCELLED
     await db.commit()
+
+
+@router.put(
+    "/{dataset_id}/uploads/{upload_id}/parts/{part_number}",
+    status_code=status.HTTP_200_OK,
+)
+async def upload_dataset_part(
+    dataset_id: UUID,
+    upload_id: str,
+    part_number: int,
+    request: Request,
+):
+    """Proxy a single multipart part from the browser to MinIO.
+
+    The browser PUTs raw file bytes to this endpoint.  We forward them to
+    MinIO using the internal endpoint, bypassing MinIO Community's missing
+    S3 CORS support for direct browser uploads.
+
+    This endpoint is exempt from JWT auth in the middleware — the upload_id
+    acts as a capability token (it was issued only to the authenticated user
+    who called initiate).  We verify ownership via a BYPASSRLS DB lookup
+    (WorkerSession) before forwarding any bytes.  No RLS-scoped session is
+    used so the RLS policy cannot block the lookup.
+
+    Part numbers must be in the range 1–10 000 (S3 / MinIO limit).
+    Returns 200 with no body on success (ETag is collected server-side at
+    complete time via list_parts).
+    """
+    if not 1 <= part_number <= 10000:
+        raise HTTPException(status_code=422, detail="part_number must be 1–10000")
+
+    # Verify the upload_id exists and belongs to the given dataset_id.
+    # WorkerSession uses the celery_worker DB role (BYPASSRLS) — required
+    # because this endpoint is exempt from Clerk auth and no RLS context is set.
+    def _lookup() -> tuple[UUID | None, str | None]:
+        from app.workers.db import WorkerSession  # noqa: PLC0415
+        from sqlalchemy import select as sync_select  # noqa: PLC0415
+
+        with WorkerSession() as session:
+            row = session.execute(
+                sync_select(Job).where(Job.config["upload_id"].astext == upload_id)
+            ).scalar_one_or_none()
+            if row is None:
+                return None, None
+            refs = row.input_refs or []
+            if not any(r.get("id") == str(dataset_id) for r in refs):
+                return None, None
+            return row.organization_id, row.config["s3_key"]
+
+    org_id, s3_key = await asyncio.to_thread(_lookup)
+    if org_id is None:
+        raise HTTPException(status_code=404, detail="Upload job not found")
+
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=422, detail="Request body must not be empty")
+
+    await asyncio.to_thread(
+        storage_service.upload_part, org_id, s3_key, upload_id, part_number, data
+    )

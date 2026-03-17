@@ -14,6 +14,7 @@ normally — the bypass only fires when the Authorization header is absent.
 """
 
 import ipaddress
+import re
 import time
 from typing import Any
 
@@ -30,6 +31,13 @@ EXEMPT_PATHS: set[str] = {
     "/api/v1/webhooks/clerk",
     "/api/v1/health",
 }
+
+# Part-upload proxy: PUT /api/v1/datasets/{id}/uploads/{upload_id}/parts/{n}
+# The upload_id acts as a capability token — possession proves the caller initiated
+# the upload. Auth is enforced inside the endpoint via DB lookup.
+_PARTS_UPLOAD_RE = re.compile(
+    r"^/api/v1/datasets/[^/]+/uploads/[^/]+/parts/\d+$"
+)
 
 # Dev claim set injected when no Authorization header is present in development.
 _DEV_CLAIMS: dict[str, Any] = {
@@ -51,11 +59,23 @@ class ClerkAuthMiddleware(BaseHTTPMiddleware):
         if request.url.path in EXEMPT_PATHS:
             return await call_next(request)
 
+        # Part-upload proxy is exempt — the endpoint verifies the upload_id itself.
+        if request.method == "PUT" and _PARTS_UPLOAD_RE.match(request.url.path):
+            return await call_next(request)
+
         auth_header = request.headers.get("Authorization", "")
 
         # Development bypass — no token present → inject dev claims, but only from local/private IPs.
         if settings.ENVIRONMENT == "development" and not auth_header:
             if self._is_dev_bypass_allowed(request):
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "DEV BYPASS active for %s %s — using org_id='org_dev' "
+                    "(UUID 00000000-0000-0000-0000-000000000001). "
+                    "If you get 404s on resources created with a real Clerk token, "
+                    "add 'Authorization: Bearer <token>' to your request.",
+                    request.method, request.url.path,
+                )
                 request.state.clerk_claims = _DEV_CLAIMS
                 return await call_next(request)
             return JSONResponse(

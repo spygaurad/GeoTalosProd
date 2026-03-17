@@ -113,6 +113,7 @@ class UploadInitiateResponse(BaseModel):
     job_id: UUID
     s3_key: str
     part_size_bytes: int
+    total_parts: int
     part_urls: list[UploadPartUrl]
 
 
@@ -130,7 +131,10 @@ class UploadPart(BaseModel):
 
 
 class UploadCompleteRequest(BaseModel):
-    parts: list[UploadPart] = Field(min_length=1)
+    # parts is optional: MinIO Community cannot expose ETag via CORS, so
+    # clients may not be able to collect them.  When omitted, the API lists
+    # uploaded parts from MinIO server-side before calling CompleteMultipartUpload.
+    parts: list[UploadPart] | None = None
 
 
 class UploadJobResponse(BaseModel):

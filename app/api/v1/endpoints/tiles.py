@@ -112,7 +112,8 @@ async def proxy_mosaic_tile(
     The ``searchid`` is an opaque value returned by ``GET /datasets/{id}/tilejson``.
     All query parameters (assets, colormap, rescale, etc.) are forwarded as-is.
     """
-    titiler_path = f"/mosaic/{searchid}/{z}/{x}/{y}.{fmt}"
+    # titiler-pgstac path: /searches/{id}/tiles/WebMercatorQuad/{z}/{x}/{y}@1x.{fmt}
+    titiler_path = f"/searches/{searchid}/tiles/WebMercatorQuad/{z}/{x}/{y}@1x.{fmt}"
     return await _proxy_tile(titiler_path, str(request.query_params))
 
 

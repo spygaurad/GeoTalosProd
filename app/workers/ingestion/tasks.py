@@ -317,3 +317,18 @@ def ingest_dataset(self, job_id: str, dataset_id: str, s3_key: str, filename: st
             session.rollback()
             logger.exception("Transient error, will retry")
             raise self.retry(exc=exc)
+
+
+@celery_app.task(ignore_result=True)
+def refresh_annotation_statistics():
+    """Refresh the annotation_statistics materialized view.
+
+    Scheduled hourly by Celery beat and also called after bulk annotation ops.
+    Routed to the 'default' queue via beat_schedule options.
+    """
+    with WorkerSession() as session:
+        session.execute(
+            text("REFRESH MATERIALIZED VIEW CONCURRENTLY annotation_statistics")
+        )
+        session.commit()
+    logger.info("annotation_statistics materialized view refreshed")

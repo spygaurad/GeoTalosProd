@@ -207,18 +207,26 @@ services:
       com.awakeforest.role: stac
 
   titiler:
-    # titiler-pgstac 1.7.2 — matches eoAPI reference
-    # Forced to linux/amd64 for GDAL native lib compatibility on ARM hosts
+    # titiler-pgstac 2.1.0
+    # In 2.x the image no longer auto-starts with PORT env var — explicit command required.
     image: ghcr.io/stac-utils/titiler-pgstac:2.1.0
     # platform: linux/amd64
     container_name: awakeforest-titiler
     restart: unless-stopped
+    mem_limit: 3g
+    command: >
+      gunicorn -k uvicorn.workers.UvicornWorker
+      titiler.pgstac.main:app
+      --bind 0.0.0.0:8000
+      --workers ${TITILER_WORKERS:-2}
+      --timeout 120
     environment:
       PGUSER: pgstac_read
       PGPASSWORD: ${STAC_READ_PASSWORD:-read_pass}
       PGDATABASE: pgstac
       PGHOST: stac-db
       PGPORT: 5432
+      PGOPTIONS: -c search_path=pgstac,public
       DB_MIN_CONN_SIZE: ${TITILER_DB_MIN_CONN:-1}
       DB_MAX_CONN_SIZE: ${TITILER_DB_MAX_CONN:-5}
       MOSAIC_CONCURRENCY: ${TITILER_MOSAIC_CONCURRENCY:-4}
@@ -233,22 +241,31 @@ services:
       VSI_CACHE: "TRUE"
       VSI_CACHE_SIZE: "${VSI_CACHE_SIZE:-536870912}"
       CPL_VSIL_CURL_CACHE_SIZE: "${CPL_VSIL_CURL_CACHE_SIZE:-200000000}"
-      # MinIO/S3 access for reading original files
+      # MinIO/S3 — boto3 uses AWS_ENDPOINT_URL; GDAL/VSI uses AWS_S3_ENDPOINT (host:port, no protocol)
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
       AWS_ENDPOINT_URL: http://minio:9000
+      AWS_S3_ENDPOINT: minio:9000
       AWS_REGION: ${AWS_REGION:-us-east-1}
-      AWS_HTTPS: "false"            # Force HTTP for local MinIO
-      AWS_VIRTUAL_HOSTING: "false"  # Virtual-hosted style (bucket.minio:9000) doesn't work with our local setup and
+      AWS_HTTPS: "NO"
+      AWS_VIRTUAL_HOSTING: "FALSE"
       AWS_S3_FORCE_PATH_STYLE: "true"
-      PORT: 8000
     ports:
       - "${TITILER_PORT:-8082}:8000"
     depends_on:
       stac-db:
         condition: service_healthy
+      stac-db-migrate:
+        condition: service_completed_successfully
       minio:
         condition: service_healthy
+    healthcheck:
+      # 2.x has no /healthz — use root landing page
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     networks:
       - awakeforest-stac
       - awakeforest-storage
@@ -388,6 +405,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      titiler:
+        condition: service_healthy
     networks:
       - awakeforest-backend
       - awakeforest-stac
@@ -415,6 +434,8 @@ services:
       --queues=ingestion,discovery
       --concurrency=${WORKER_CONCURRENCY_INGESTION:-4}
       --hostname=ingestion@%h
+    volumes:
+      - .:/app  # mount source for development — keeps worker code in sync with API
     depends_on:
       app-db:
         condition: service_healthy
@@ -447,6 +468,8 @@ services:
       --queues=bulk
       --concurrency=${WORKER_CONCURRENCY_BULK:-4}
       --hostname=bulk@%h
+    volumes:
+      - .:/app
     depends_on:
       app-db:
         condition: service_healthy
@@ -475,6 +498,8 @@ services:
       --queues=analysis
       --concurrency=${WORKER_CONCURRENCY_ANALYSIS:-4}
       --hostname=analysis@%h
+    volumes:
+      - .:/app
     depends_on:
       app-db:
         condition: service_healthy
@@ -506,6 +531,8 @@ services:
       --queues=inference
       --concurrency=${WORKER_CONCURRENCY_INFERENCE:-2}
       --hostname=inference@%h
+    volumes:
+      - .:/app
     depends_on:
       app-db:
         condition: service_healthy
@@ -533,6 +560,8 @@ services:
       --queues=default
       --concurrency=${WORKER_CONCURRENCY_DEFAULT:-2}
       --hostname=default@%h
+    volumes:
+      - .:/app
     depends_on:
       app-db:
         condition: service_healthy
@@ -557,6 +586,7 @@ services:
       --loglevel=${LOG_LEVEL:-INFO}
       --schedule=/var/celerybeat/celerybeat-schedule
     volumes:
+      - .:/app
       - celerybeat-schedule:/var/celerybeat  # persist schedule file across restarts
     depends_on:
       app-db:
@@ -584,6 +614,8 @@ services:
       celery -A app.workers.celery_app flower
       --port=5555
       --broker_api=redis://:${REDIS_PASSWORD:-redis_pass}@redis:6379/0
+    volumes:
+      - .:/app
     ports:
       - "${FLOWER_PORT:-5555}:5555"
     depends_on:

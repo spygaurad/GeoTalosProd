@@ -6,9 +6,11 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import conflict, not_found
 from app.models.map import Map
+from app.models.map_layer import MapLayer
 from app.models.project import Project
 from app.schemas.map import MapCreate, MapUpdate
 
@@ -18,6 +20,12 @@ logger = logging.getLogger(__name__)
 class MapService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
+
+    def _with_layers(self, query):
+        """Attach selectinload for layers so callers always get them populated."""
+        return query.options(
+            selectinload(Map.layers)
+        )
 
     async def list_maps(
         self,
@@ -41,7 +49,7 @@ class MapService:
             )
 
         rows = await self.db.scalars(
-            query.order_by(Map.created_at.desc()).limit(limit).offset(offset)
+            self._with_layers(query).order_by(Map.created_at.desc()).limit(limit).offset(offset)
         )
         total = await self.db.scalar(count_query)
         logger.debug(
@@ -57,18 +65,17 @@ class MapService:
     async def get_map(
         self, map_id: UUID, organization_id: UUID | None = None, project_id: UUID | None = None
     ) -> Map:
-        if organization_id is None and project_id is None:
-            map_row = await self.db.get(Map, map_id)
-        else:
-            query = select(Map).where(Map.id == map_id)
-            if project_id is not None:
-                query = query.where(Map.project_id == project_id)
-            if organization_id is not None:
-                query = query.join(Project, Project.id == Map.project_id).where(
-                    Project.organization_id == organization_id
-                )
-            result = await self.db.execute(query)
-            map_row = result.scalar_one_or_none()
+        query = self._with_layers(
+            select(Map).where(Map.id == map_id, Map.deleted_at.is_(None))
+        )
+        if project_id is not None:
+            query = query.where(Map.project_id == project_id)
+        if organization_id is not None:
+            query = query.join(Project, Project.id == Map.project_id).where(
+                Project.organization_id == organization_id
+            )
+        result = await self.db.execute(query)
+        map_row = result.scalar_one_or_none()
         if map_row is None:
             logger.warning("get_map_not_found map_id=%s", map_id)
             raise not_found("Map")
@@ -86,6 +93,10 @@ class MapService:
             logger.warning("create_map_conflict project_id=%s", payload.project_id)
             raise conflict("Map creation violates uniqueness or FK constraints") from exc
         await self.db.refresh(map_row)
+        # Eagerly load layers (empty list for a new map)
+        await self.db.execute(
+            select(Map).options(selectinload(Map.layers)).where(Map.id == map_row.id)
+        )
         logger.info("create_map_success map_id=%s", map_row.id)
         return map_row
 
@@ -97,9 +108,31 @@ class MapService:
         project_id: UUID | None = None,
     ) -> Map:
         map_row = await self.get_map(map_id, organization_id=organization_id, project_id=project_id)
-        data = payload.model_dump(exclude_unset=True)
+
+        # Apply top-level map fields (exclude the synthetic `layers` field)
+        data = payload.model_dump(exclude_unset=True, exclude={"layers"})
         for key, value in data.items():
             setattr(map_row, key, value)
+
+        # Apply embedded layer state updates (from the 8-second debounced save)
+        if payload.layers:
+            layer_by_id = {layer.id: layer for layer in map_row.layers}
+            for layer_update in payload.layers:
+                layer = layer_by_id.get(layer_update.id)
+                if layer is None:
+                    # Layer no longer exists — skip silently (frontend may be stale)
+                    logger.debug(
+                        "update_map_skip_missing_layer map_id=%s layer_id=%s",
+                        map_id,
+                        layer_update.id,
+                    )
+                    continue
+                update_fields = layer_update.model_dump(
+                    exclude_unset=True, exclude={"id"}
+                )
+                for key, value in update_fields.items():
+                    setattr(layer, key, value)
+
         try:
             await self.db.commit()
         except IntegrityError as exc:

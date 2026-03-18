@@ -11,6 +11,7 @@ from app.schemas.map_layer import (
     MapLayerCreate,
     MapLayerListResponse,
     MapLayerRead,
+    MapLayerReorderRequest,
     MapLayerUpdate,
 )
 from app.services.map_layer_service import MapLayerService
@@ -115,3 +116,32 @@ async def delete_map_layer(
         entity_id=str(layer_id),
         session=db,
     )
+
+
+@router.put("/reorder", response_model=list[MapLayerRead])
+async def reorder_map_layers(
+    map_id: UUID,
+    payload: MapLayerReorderRequest,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Reorder layers by providing an ordered list of layer IDs.
+
+    The first ID becomes ``z_index = 0`` (rendered at the bottom of the stack),
+    the last becomes ``z_index = N-1`` (rendered on top).  All provided IDs
+    must belong to this map.  Layers not in the list keep their current z_index.
+    """
+    service = MapLayerService(db)
+    layers = await service.reorder_layers(
+        map_id=map_id, organization_id=org_id, layer_ids=payload.layer_ids
+    )
+    await log_audit_event(
+        action="map_layers.reorder",
+        actor_id=str(current_user.id),
+        organization_id=str(org_id),
+        entity="map",
+        entity_id=str(map_id),
+        session=db,
+    )
+    return layers

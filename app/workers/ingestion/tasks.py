@@ -21,6 +21,7 @@ from sqlalchemy import create_engine, text
 from app.config import settings
 from app.core.enums import DatasetStatus, JobStatus
 from app.models.dataset import Dataset
+from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.services import storage_service
 from app.workers.celery_app import celery_app
@@ -156,14 +157,15 @@ def _ingest_single_cog(
     filename: str,
     collection: str,
     s3_config: dict,
-) -> tuple[bool, list[str]]:
-    """
-    Validate a COG and insert it as a STAC item.
-    Returns (success, issues).
+) -> tuple[bool, list[str], str | None, dict | None]:
+    """Validate a COG and insert it as a STAC item.
+
+    Returns (success, issues, stac_item_id, stac_item_dict).
+    On failure stac_item_id and stac_item_dict are None.
     """
     is_valid, issues = validate_cog(s3_uri, s3_config)
     if not is_valid:
-        return False, issues
+        return False, issues, None, None
     if issues:
         logger.warning("cog_warnings uri=%s warnings=%s", s3_uri, issues)
 
@@ -174,7 +176,68 @@ def _ingest_single_cog(
     item = build_stac_item(item_id, collection, s3_uri, metadata)
     upsert_stac_item(item, settings.STAC_SYNC_DATABASE_URL)
 
-    return True, issues
+    return True, issues, item_id, item
+
+
+def _upsert_dataset_item(
+    session,
+    *,
+    dataset_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    stac_item_id: str,
+    stac_collection_id: str,
+    s3_uri: str,
+    filename: str,
+    stac_item: dict,
+) -> None:
+    """Upsert a DatasetItem row after a successful COG ingestion.
+
+    Uses SQLAlchemy merge-by-unique-key pattern: load existing row if present,
+    otherwise create a new one.  Idempotent — safe to re-run on retry.
+    """
+    from sqlalchemy import select as sync_select  # noqa: PLC0415
+
+    existing = session.execute(
+        sync_select(DatasetItem).where(DatasetItem.stac_item_id == stac_item_id)
+    ).scalar_one_or_none()
+
+    # Extract geometry (GeoJSON dict) and datetime from the STAC item
+    geometry = stac_item.get("geometry")
+    dt_str = (stac_item.get("properties") or {}).get("datetime")
+    item_datetime = None
+    if dt_str:
+        from datetime import timezone  # noqa: PLC0415
+        from dateutil import parser as dtparser  # noqa: PLC0415
+        try:
+            item_datetime = dtparser.parse(dt_str).replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+    properties_cache = stac_item.get("properties")
+
+    if existing is None:
+        row = DatasetItem(
+            id=uuid.uuid4(),
+            dataset_id=dataset_id,
+            organization_id=organization_id,
+            stac_item_id=stac_item_id,
+            stac_collection_id=stac_collection_id,
+            s3_uri=s3_uri,
+            filename=filename,
+            geometry=geometry,
+            item_datetime=item_datetime,
+            properties_cache=properties_cache,
+            is_active=True,
+        )
+        session.add(row)
+    else:
+        # Idempotent update — keep the row current
+        existing.is_active = True
+        existing.s3_uri = s3_uri
+        existing.filename = filename
+        existing.geometry = geometry
+        existing.item_datetime = item_datetime
+        existing.properties_cache = properties_cache
     
 def _ingest_zip(session, job, dataset, bucket, s3_key, dataset_id, gdal_env):
     collection = _ensure_collection(session, dataset, job.organization_id)
@@ -224,12 +287,22 @@ def _ingest_zip(session, job, dataset, bucket, s3_key, dataset_id, gdal_env):
                         job.organization_id, extracted_key, file_path
                     )
 
-                    success, issues = _ingest_single_cog(
+                    success, issues, item_id, stac_item = _ingest_single_cog(
                         s3_uri, basename, collection, gdal_env
                     )
 
                     if success:
                         job.processed_items += 1
+                        _upsert_dataset_item(
+                            session,
+                            dataset_id=uuid.UUID(dataset_id),
+                            organization_id=job.organization_id,
+                            stac_item_id=item_id,
+                            stac_collection_id=collection,
+                            s3_uri=s3_uri,
+                            filename=basename,
+                            stac_item=stac_item,
+                        )
                     else:
                         failed_files.append(f"{basename}: {'; '.join(issues)}")
 
@@ -273,11 +346,23 @@ def ingest_dataset(self, job_id: str, dataset_id: str, s3_key: str, filename: st
             else:
                 collection = _ensure_collection(session, dataset, job.organization_id)
                 s3_uri = f"s3://{bucket}/{s3_key}"
-                success, issues = _ingest_single_cog(s3_uri, filename, collection, gdal_env)
+                success, issues, item_id, stac_item = _ingest_single_cog(
+                    s3_uri, filename, collection, gdal_env
+                )
 
                 if not success:
                     raise PermanentTaskError("\n".join(issues))
 
+                _upsert_dataset_item(
+                    session,
+                    dataset_id=uuid.UUID(dataset_id),
+                    organization_id=job.organization_id,
+                    stac_item_id=item_id,
+                    stac_collection_id=collection,
+                    s3_uri=s3_uri,
+                    filename=filename,
+                    stac_item=stac_item,
+                )
                 job.processed_items = 1
                 job.progress = 1.0
                 session.commit()

@@ -42,4 +42,9 @@ class Dataset(Base):
         "AnnotationSet",
         back_populates="dataset",
     )
+    items: Mapped[list["DatasetItem"]] = relationship(
+        "DatasetItem",
+        back_populates="dataset",
+        cascade="all, delete-orphan",
+    )
     creator: Mapped["User | None"] = relationship("User", foreign_keys=[created_by])

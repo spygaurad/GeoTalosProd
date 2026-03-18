@@ -2,15 +2,14 @@
 MinIO / S3 object storage helpers.
 
 All methods are synchronous (boto3 has no async API). Call from FastAPI
-endpoints via `asyncio.get_event_loop().run_in_executor` or directly —
-boto3 calls are fast enough for metadata operations (initiate, complete,
-abort, presign). Heavy I/O (actual file bytes) never touches this process;
-clients upload directly to MinIO via the presigned URLs returned here.
+endpoints via ``asyncio.to_thread``. Clients are module-level singletons
+so the SSL/credential setup cost is paid once, not per-call.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 
 import boto3
@@ -22,35 +21,62 @@ from app.config import settings
 # S3 path: {S3_BUCKET_PREFIX}{org_id}/datasets/{dataset_id}/{filename}
 _KEY_TEMPLATE = "datasets/{dataset_id}/{filename}"
 
+# ── Shared boto3 client config ────────────────────────────────────────────────
+
+_SHARED_CONFIG = Config(
+    s3={"addressing_style": "path"},
+    signature_version="s3v4",
+    connect_timeout=10,
+    read_timeout=30,
+    max_pool_connections=25,
+    tcp_keepalive=True,
+    retries={"max_attempts": 3, "mode": "standard"},
+)
+
+# Module-level singletons — created once on first use (thread-safe).
+_internal_client: boto3.client | None = None
+_public_client: boto3.client | None = None
+_client_lock = threading.Lock()
+
 
 def _s3_client() -> boto3.client:
-    """Return a boto3 S3 client pointed at the internal MinIO endpoint."""
-    return boto3.client(
-        "s3",
-        endpoint_url=settings.AWS_ENDPOINT_URL,
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        region_name=settings.AWS_REGION,
-        config=Config(s3={"addressing_style": "path"}),
-    )
+    """Return a cached boto3 S3 client pointed at the internal MinIO endpoint."""
+    global _internal_client  # noqa: PLW0603
+    if _internal_client is None:
+        with _client_lock:
+            if _internal_client is None:
+                _internal_client = boto3.client(
+                    "s3",
+                    endpoint_url=settings.AWS_ENDPOINT_URL,
+                    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                    region_name=settings.AWS_REGION,
+                    config=_SHARED_CONFIG,
+                )
+    return _internal_client
 
 
 def _s3_client_public() -> boto3.client:
-    """Return a boto3 S3 client pointed at the PUBLIC MinIO endpoint.
+    """Return a cached boto3 S3 client pointed at the PUBLIC MinIO endpoint.
 
     Used exclusively to generate presigned URLs that browsers can reach.
     The internal ``http://minio:9000`` hostname is not resolvable outside
     the Docker network, so any URL signed with that endpoint would fail in
     the browser.
     """
-    return boto3.client(
-        "s3",
-        endpoint_url=settings.PUBLIC_MINIO_URL,
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        region_name=settings.AWS_REGION,
-        config=Config(s3={"addressing_style": "path"}),
-    )
+    global _public_client  # noqa: PLW0603
+    if _public_client is None:
+        with _client_lock:
+            if _public_client is None:
+                _public_client = boto3.client(
+                    "s3",
+                    endpoint_url=settings.PUBLIC_MINIO_URL,
+                    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                    region_name=settings.AWS_REGION,
+                    config=_SHARED_CONFIG,
+                )
+    return _public_client
 
 
 def bucket_name(org_id: uuid.UUID) -> str:
@@ -184,6 +210,38 @@ def generate_part_url(
         },
         ExpiresIn=ttl_seconds,
     )
+
+
+def generate_part_urls_batch(
+    org_id: uuid.UUID,
+    s3_key: str,
+    upload_id: str,
+    part_numbers: list[int],
+    ttl_seconds: int = 3600,
+) -> list[tuple[int, str]]:
+    """Return presigned PUT URLs for multiple parts in one call.
+
+    Uses a single cached client for all signatures — avoids per-call
+    client creation overhead.  Returns ``[(part_number, url), ...]``.
+    """
+    client = _s3_client_public()
+    bkt = bucket_name(org_id)
+    return [
+        (
+            n,
+            client.generate_presigned_url(
+                "upload_part",
+                Params={
+                    "Bucket": bkt,
+                    "Key": s3_key,
+                    "UploadId": upload_id,
+                    "PartNumber": n,
+                },
+                ExpiresIn=ttl_seconds,
+            ),
+        )
+        for n in part_numbers
+    ]
 
 
 def upload_part(

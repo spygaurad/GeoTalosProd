@@ -30,6 +30,9 @@ from app.config import settings
 EXEMPT_PATHS: set[str] = {
     "/api/v1/webhooks/clerk",
     "/api/v1/health",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
 }
 
 # Part-upload proxy: PUT /api/v1/datasets/{id}/uploads/{upload_id}/parts/{n}

@@ -5,6 +5,7 @@ from app.models.annotation_class import AnnotationClass
 from app.models.annotation_schema import AnnotationSchema
 from app.models.annotation_set import AnnotationSet
 from app.models.dataset import Dataset
+from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.models.job_output import JobOutput
 from app.models.map import Map
@@ -23,6 +24,7 @@ __all__ = [
     "AnnotationSchema",
     "AnnotationSet",
     "Dataset",
+    "DatasetItem",
     "Job",
     "JobOutput",
     "Map",

@@ -118,3 +118,9 @@ class MapLayerRead(ORMModel):
 
 
 MapLayerListResponse = PaginatedResponse[MapLayerRead]
+
+
+class MapLayerReorderRequest(ORMModel):
+    """Ordered list of layer IDs — first element becomes z_index 0 (bottom)."""
+
+    layer_ids: list[UUID] = Field(min_length=1)

@@ -28,8 +28,8 @@ class AnnotationSet(Base):
     map_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("maps.id", ondelete="CASCADE"), nullable=False
     )
-    schema_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("annotation_schemas.id"), nullable=False
+    schema_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("annotation_schemas.id"), nullable=True
     )
     dataset_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("datasets.id", ondelete="SET NULL"), nullable=True

@@ -115,3 +115,37 @@ class MapLayerService:
         await self.db.delete(layer)
         await self.db.commit()
         logger.info("delete_layer_success layer_id=%s", layer_id)
+
+    async def reorder_layers(
+        self, map_id: UUID, organization_id: UUID, layer_ids: list[UUID]
+    ) -> list[MapLayer]:
+        """Assign z_index 0, 1, 2… based on the caller-supplied ordering.
+
+        All provided layer IDs must belong to this map.  Any layers not
+        mentioned in the list keep their existing z_index (they will sort
+        after the reordered layers).  Returns layers ordered by new z_index.
+        """
+        await self._get_map_for_org(map_id, organization_id)
+
+        result = await self.db.execute(
+            select(MapLayer).where(MapLayer.map_id == map_id)
+        )
+        all_layers = {layer.id: layer for layer in result.scalars().all()}
+
+        unknown = [lid for lid in layer_ids if lid not in all_layers]
+        if unknown:
+            raise bad_request(
+                f"Layer IDs not found on this map: {[str(u) for u in unknown]}"
+            )
+
+        for z, lid in enumerate(layer_ids):
+            all_layers[lid].z_index = z
+
+        await self.db.commit()
+        logger.info("reorder_layers_success map_id=%s count=%s", map_id, len(layer_ids))
+
+        # Refresh to pick up server-side updated_at (onupdate=func.now() expires it after commit)
+        for lid in layer_ids:
+            await self.db.refresh(all_layers[lid])
+
+        return sorted([all_layers[lid] for lid in layer_ids], key=lambda layer: layer.z_index)

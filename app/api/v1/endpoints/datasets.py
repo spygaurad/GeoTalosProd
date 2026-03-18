@@ -3,6 +3,7 @@ import math
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +12,7 @@ from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
 from app.core.enums import DatasetStatus, JobStatus, JobType
 from app.core.exceptions import not_found
+from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.models.user import User
 from app.schemas.dataset import (
@@ -26,31 +28,21 @@ from app.schemas.dataset import (
     UploadJobResponse,
     UploadPartUrl,
 )
+from app.schemas.dataset_item import DatasetItemListResponse, DatasetItemTileConfig
 from app.services.dataset_service import DatasetService
 from app.services import storage_service
 from app.services import titiler_service
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
-# Part size used for multipart uploads: 100 MiB.
-# MinIO / S3 minimum is 5 MiB per part (except the last).
-_PART_SIZE_BYTES = 100 * 1024 * 1024
+# Part size used for multipart uploads: 50 MiB.
+# Larger parts = fewer round trips = faster uploads. MinIO / S3 minimum is
+# 5 MiB per part (except the last); max 10 000 parts per upload.
+# 50 MiB × 10 000 = ~488 GiB max file size.
+_PART_SIZE_BYTES = 50 * 1024 * 1024
 # Number of presigned part URLs returned in the initiate response.
-# Clients needing more call POST /{id}/uploads/{upload_id}/part-urls.
-_INITIAL_PART_BATCH = 10
-
-
-def _part_proxy_url(dataset_id: UUID, upload_id: str, part_number: int) -> str:
-    """Return the API-proxy URL the browser should PUT a part to.
-
-    Using the API as a proxy avoids MinIO Community's S3 CORS limitation:
-    the browser can't send presigned PUT requests directly to MinIO because
-    MinIO Community does not return Access-Control-Allow-* headers on OPTIONS
-    preflight responses for S3 bucket operations.
-    """
-    from app.config import settings  # noqa: PLC0415
-    base = settings.PUBLIC_API_URL.rstrip("/")
-    return f"{base}/api/v1/datasets/{dataset_id}/uploads/{upload_id}/parts/{part_number}"
+# For most files (< 500 MiB) this covers all parts in a single response.
+_INITIAL_PART_BATCH = 50
 
 
 async def _get_upload_job(
@@ -166,6 +158,94 @@ async def delete_dataset_by_id(
     )
 
 
+# ── Dataset items ─────────────────────────────────────────────────────────────
+
+
+@router.get("/{dataset_id}/items", response_model=DatasetItemListResponse)
+async def list_dataset_items(
+    dataset_id: UUID,
+    limit: int = Depends(limit_param),
+    offset: int = Depends(offset_param),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    """List individual files (STAC items) that were ingested into this dataset.
+
+    Results are ordered by ``item_datetime`` ascending so the frontend can
+    build a chronological timeline.  Only active items are returned.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    # Verify the dataset belongs to this org (raises 404 if not)
+    service = DatasetService(db)
+    await service.get_dataset(dataset_id, organization_id=org_id)
+
+    base_q = (
+        select(DatasetItem)
+        .where(DatasetItem.dataset_id == dataset_id, DatasetItem.is_active.is_(True))
+    )
+    total_result = await db.execute(
+        base_q.with_only_columns(__import__("sqlalchemy").func.count())
+    )
+    total = total_result.scalar_one()
+
+    rows = await db.scalars(
+        base_q.order_by(DatasetItem.item_datetime.asc().nullslast(), DatasetItem.created_at.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return DatasetItemListResponse(
+        items=rows.all(), total=total, limit=limit, offset=offset
+    )
+
+
+@router.get("/{dataset_id}/items/{item_id}/tile-config", response_model=DatasetItemTileConfig)
+async def get_dataset_item_tile_config(
+    dataset_id: UUID,
+    item_id: UUID,
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    """Return stable tile URL template for a single dataset item.
+
+    The ``tile_url_template`` points at the API's own tile proxy so the
+    browser never needs a direct connection to titiler.  The frontend
+    substitutes ``{z}``, ``{x}``, ``{y}`` and may append titiler render
+    params (``assets``, ``rescale``, ``colormap``, etc.) as query params.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+    from app.config import settings as _settings  # noqa: PLC0415
+    import urllib.parse  # noqa: PLC0415
+
+    # Verify dataset ownership
+    service = DatasetService(db)
+    await service.get_dataset(dataset_id, organization_id=org_id)
+
+    result = await db.execute(
+        select(DatasetItem).where(
+            DatasetItem.id == item_id,
+            DatasetItem.dataset_id == dataset_id,
+            DatasetItem.is_active.is_(True),
+        )
+    )
+    item = result.scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Dataset item not found")
+
+    base = _settings.PUBLIC_API_URL.rstrip("/")
+    encoded_uri = urllib.parse.quote(item.s3_uri, safe="")
+    tile_url_template = (
+        f"{base}/api/v1/tiles/stac/{{z}}/{{x}}/{{y}}.png?url={encoded_uri}"
+    )
+    return DatasetItemTileConfig(
+        stac_item_id=item.stac_item_id,
+        dataset_id=dataset_id,
+        tile_url_template=tile_url_template,
+    )
+
+
 # ── TiTiler tilejson ──────────────────────────────────────────────────────────
 
 
@@ -261,18 +341,18 @@ async def initiate_dataset_upload(
     await db.commit()
     await db.refresh(job)
 
-    # Pre-generate the first batch of part URLs pointing at the API proxy.
-    # We intentionally route through the API rather than generating presigned
-    # MinIO URLs because MinIO Community does not serve CORS headers on S3
-    # OPTIONS preflights, so browsers cannot PUT directly to MinIO.
+    # Pre-generate presigned URLs for the first batch of parts.
+    # Uses batch generation (single boto3 client) via a thread to avoid
+    # blocking the async event loop.
     total_parts = max(1, math.ceil(payload.file_size_bytes / _PART_SIZE_BYTES))
     first_batch = min(_INITIAL_PART_BATCH, total_parts)
+    batch_results = await asyncio.to_thread(
+        storage_service.generate_part_urls_batch,
+        org_id, s3_key, upload_id, list(range(1, first_batch + 1)),
+    )
     part_urls = [
-        UploadPartUrl(
-            part_number=n,
-            url=_part_proxy_url(dataset_id, upload_id, n),
-        )
-        for n in range(1, first_batch + 1)
+        UploadPartUrl(part_number=n, url=url)
+        for n, url in batch_results
     ]
 
     return UploadInitiateResponse(
@@ -294,15 +374,17 @@ async def get_upload_part_urls(
     db: AsyncSession = Depends(get_session),
     _current_user: User = Depends(get_current_user),
 ):
-    """Return API-proxy PUT URLs for additional parts beyond the initial batch."""
-    await _get_upload_job(db, upload_id, org_id, dataset_id)  # auth/ownership check
+    """Return presigned S3 PUT URLs for additional parts beyond the initial batch."""
+    job = await _get_upload_job(db, upload_id, org_id, dataset_id)
+    s3_key = job.config["s3_key"]
 
+    batch_results = await asyncio.to_thread(
+        storage_service.generate_part_urls_batch,
+        org_id, s3_key, upload_id, payload.part_numbers,
+    )
     part_urls = [
-        UploadPartUrl(
-            part_number=n,
-            url=_part_proxy_url(dataset_id, upload_id, n),
-        )
-        for n in payload.part_numbers
+        UploadPartUrl(part_number=n, url=url)
+        for n, url in batch_results
     ]
     return PartUrlsResponse(part_urls=part_urls)
 
@@ -419,6 +501,19 @@ async def upload_dataset_part(
     if not 1 <= part_number <= 10000:
         raise HTTPException(status_code=422, detail="part_number must be 1–10000")
 
+    # Read body FIRST — before any blocking I/O.  Starlette's
+    # BaseHTTPMiddleware wraps the ASGI body stream; if we do blocking work
+    # (like a DB query via to_thread) before consuming the stream, the
+    # middleware's internal Task can mark the stream as disconnected, causing
+    # a spurious ClientDisconnect on the subsequent request.body() call.
+    try:
+        data = await request.body()
+    except Exception:
+        # Client disconnected before we could read the body — nothing to do.
+        return JSONResponse({"detail": "Client disconnected"}, status_code=499)
+    if not data:
+        raise HTTPException(status_code=422, detail="Request body must not be empty")
+
     # Verify the upload_id exists and belongs to the given dataset_id.
     # WorkerSession uses the celery_worker DB role (BYPASSRLS) — required
     # because this endpoint is exempt from Clerk auth and no RLS context is set.
@@ -440,10 +535,6 @@ async def upload_dataset_part(
     org_id, s3_key = await asyncio.to_thread(_lookup)
     if org_id is None:
         raise HTTPException(status_code=404, detail="Upload job not found")
-
-    data = await request.body()
-    if not data:
-        raise HTTPException(status_code=422, detail="Request body must not be empty")
 
     await asyncio.to_thread(
         storage_service.upload_part, org_id, s3_key, upload_id, part_number, data

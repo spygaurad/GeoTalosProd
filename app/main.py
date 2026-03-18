@@ -10,6 +10,7 @@ from app.api.v1.router import api_router
 from app.config import settings
 from app.core.logging import configure_logging
 from app.middleware.clerk_auth import ClerkAuthMiddleware
+from app.models.organization_member import OrganizationMember
 
 configure_logging(settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
@@ -67,6 +68,17 @@ async def _seed_dev_fixtures() -> None:
                     name="Dev User",
                 )
                 .on_conflict_do_nothing(index_elements=["clerk_id"])
+            )
+
+            # Upsert membership (dev user is admin of dev org)
+            await session.execute(
+                pg_insert(OrganizationMember.__table__)
+                .values(
+                    organization_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+                    user_id=uuid.UUID("00000000-0000-0000-0000-000000000002"),
+                    role="admin",  # or "member" – admin is highest
+                )
+                .on_conflict_do_nothing(index_elements=["organization_id", "user_id"])
             )
 
 

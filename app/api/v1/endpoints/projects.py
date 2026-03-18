@@ -1,12 +1,17 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_session, require_org_role
 from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
+from app.models.dataset import Dataset
+from app.models.map import Map
+from app.models.map_layer import MapLayer
 from app.models.user import User
+from app.schemas.dataset import DatasetListResponse, DatasetRead
 from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectRead, ProjectUpdate
 from app.services.project_service import ProjectService
 
@@ -51,10 +56,8 @@ async def create_project(
     db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    if payload.organization_id != org_id:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
     service = ProjectService(db)
-    project = await service.create_project(payload, created_by=current_user.id)
+    project = await service.create_project(payload, organization_id=org_id, created_by=current_user.id)
     await log_audit_event(
         action="projects.create",
         actor_id=str(current_user.id),
@@ -103,4 +106,57 @@ async def delete_project_by_id(
         entity="project",
         entity_id=str(project_id),
         session=db,
+    )
+
+
+@router.get("/{project_id}/datasets", response_model=DatasetListResponse)
+async def list_project_datasets(
+    project_id: UUID,
+    limit: int = Depends(limit_param),
+    offset: int = Depends(offset_param),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    """List all distinct datasets used by any layer in any map in this project.
+
+    This is a convenience endpoint so the frontend doesn't have to traverse
+    maps → layers → datasets client-side.
+    """
+    # Verify the project belongs to this org
+    service = ProjectService(db)
+    await service.get_project(project_id, organization_id=org_id)
+
+    base_query = (
+        select(Dataset)
+        .join(MapLayer, MapLayer.dataset_id == Dataset.id)
+        .join(Map, Map.id == MapLayer.map_id)
+        .where(
+            Map.project_id == project_id,
+            Map.deleted_at.is_(None),
+            Dataset.organization_id == org_id,
+            Dataset.deleted_at.is_(None),
+        )
+        .distinct()
+    )
+    count_query = (
+        select(distinct(Dataset.id))
+        .join(MapLayer, MapLayer.dataset_id == Dataset.id)
+        .join(Map, Map.id == MapLayer.map_id)
+        .where(
+            Map.project_id == project_id,
+            Map.deleted_at.is_(None),
+            Dataset.organization_id == org_id,
+            Dataset.deleted_at.is_(None),
+        )
+    )
+
+    rows = await db.scalars(
+        base_query.order_by(Dataset.created_at.desc()).limit(limit).offset(offset)
+    )
+    total_rows = await db.execute(count_query)
+    total = len(total_rows.all())
+
+    return DatasetListResponse(
+        items=rows.all(), total=total, limit=limit, offset=offset
     )

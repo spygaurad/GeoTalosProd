@@ -49,6 +49,8 @@ x-app-env: &app-env
   STAC_DATABASE_URL: postgresql+asyncpg://pgstac_ingest:${STAC_INGEST_PASSWORD:-ingest_pass}@stac-db:5432/pgstac
   # STAC Catalog DB — read-only pool
   STAC_READ_URL: postgresql+asyncpg://pgstac_read:${STAC_READ_PASSWORD:-read_pass}@stac-db:5432/pgstac
+  # STAC Catalog DB — sync psycopg2 DSN for pypgstac inside Celery workers
+  STAC_SYNC_DATABASE_URL: postgresql://pgstac_ingest:${STAC_INGEST_PASSWORD:-ingest_pass}@stac-db:5432/pgstac
   # Celery worker DB (psycopg2 sync — BYPASSRLS role)
   CELERY_DATABASE_URL: postgresql+psycopg2://celery_worker:${CELERY_WORKER_PASSWORD:-celery_pass}@app-db:5432/geoplat
   # Broker / result backend
@@ -56,6 +58,10 @@ x-app-env: &app-env
   # Internal service URLs
   STAC_API_URL: http://stac-api:8080
   TITILER_URL: http://titiler:8000
+  # Public URL of the main API — used to rewrite TiTiler tile URLs in tilejson
+  # responses so browsers call the tile proxy instead of titiler directly.
+  # Override in staging/production with the real domain (no trailing slash).
+  PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:2024}
   # MinIO (S3-compatible) — path-style access for local use
   AWS_ENDPOINT_URL: http://minio:9000
   AWS_REGION: ${AWS_REGION:-us-east-1}
@@ -68,6 +74,9 @@ x-app-env: &app-env
   # Public MinIO URL used in presigned URLs returned to browsers.
   # Must be reachable from the browser, not the container network.
   PUBLIC_MINIO_URL: ${PUBLIC_MINIO_URL:-http://localhost:9002}
+  # CORS origins allowed for direct browser uploads via presigned URLs.
+  # Must match the frontend origin (e.g. http://localhost:3000 in dev).
+  MINIO_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-*}
   # Auth
   CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
   CLERK_WEBHOOK_SECRET: ${CLERK_WEBHOOK_SECRET:-}
@@ -149,6 +158,22 @@ services:
       com.awakeforest.service: stac-db
       com.awakeforest.role: database
 
+  stac-db-migrate:
+    <<: *app-build
+    container_name: awakeforest-stac-db-migrate
+    environment:
+      <<: *app-env
+      STAC_DB_SUPERUSER_PASSWORD: ${STAC_DB_SUPERUSER_PASSWORD:-pgstac_admin}
+    volumes:
+      - ./infra/docker/stac-db/migrate/migrate.py:/migrate.py:ro   # mount the script
+    command: python /migrate.py
+    depends_on:
+      stac-db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - awakeforest-stac
+      
   # ============================================================================
   # STAC LAYER
   # ============================================================================
@@ -182,18 +207,26 @@ services:
       com.awakeforest.role: stac
 
   titiler:
-    # titiler-pgstac 1.7.2 — matches eoAPI reference
-    # Forced to linux/amd64 for GDAL native lib compatibility on ARM hosts
+    # titiler-pgstac 2.1.0
+    # In 2.x the image no longer auto-starts with PORT env var — explicit command required.
     image: ghcr.io/stac-utils/titiler-pgstac:2.1.0
-    platform: linux/amd64
+    # platform: linux/amd64
     container_name: awakeforest-titiler
     restart: unless-stopped
+    mem_limit: 3g
+    command: >
+      gunicorn -k uvicorn.workers.UvicornWorker
+      titiler.pgstac.main:app
+      --bind 0.0.0.0:8000
+      --workers ${TITILER_WORKERS:-2}
+      --timeout 120
     environment:
-      POSTGRES_USER: pgstac_read
-      POSTGRES_PASS: ${STAC_READ_PASSWORD:-read_pass}
-      POSTGRES_DBNAME: pgstac
-      POSTGRES_HOST: stac-db
-      POSTGRES_PORT: 5432
+      PGUSER: pgstac_read
+      PGPASSWORD: ${STAC_READ_PASSWORD:-read_pass}
+      PGDATABASE: pgstac
+      PGHOST: stac-db
+      PGPORT: 5432
+      PGOPTIONS: -c search_path=pgstac,public
       DB_MIN_CONN_SIZE: ${TITILER_DB_MIN_CONN:-1}
       DB_MAX_CONN_SIZE: ${TITILER_DB_MAX_CONN:-5}
       MOSAIC_CONCURRENCY: ${TITILER_MOSAIC_CONCURRENCY:-4}
@@ -208,19 +241,31 @@ services:
       VSI_CACHE: "TRUE"
       VSI_CACHE_SIZE: "${VSI_CACHE_SIZE:-536870912}"
       CPL_VSIL_CURL_CACHE_SIZE: "${CPL_VSIL_CURL_CACHE_SIZE:-200000000}"
-      # MinIO/S3 access for reading original files
+      # MinIO/S3 — boto3 uses AWS_ENDPOINT_URL; GDAL/VSI uses AWS_S3_ENDPOINT (host:port, no protocol)
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
       AWS_ENDPOINT_URL: http://minio:9000
+      AWS_S3_ENDPOINT: minio:9000
       AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_HTTPS: "NO"
+      AWS_VIRTUAL_HOSTING: "FALSE"
       AWS_S3_FORCE_PATH_STYLE: "true"
     ports:
       - "${TITILER_PORT:-8082}:8000"
     depends_on:
       stac-db:
         condition: service_healthy
+      stac-db-migrate:
+        condition: service_completed_successfully
       minio:
         condition: service_healthy
+    healthcheck:
+      # 2.x has no /healthz — use root landing page
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     networks:
       - awakeforest-stac
       - awakeforest-storage
@@ -263,7 +308,7 @@ services:
   # ============================================================================
 
   minio:
-    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: awakeforest-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -271,8 +316,9 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
       MINIO_REGION: ${AWS_REGION:-us-east-1}
-      # Enable path-style so boto3 with custom endpoint works without DNS tricks
-      MINIO_DOMAIN: minio
+      # Do NOT set MINIO_DOMAIN here. That flag enables virtual-hosted-style routing
+      # (bucket.minio:9000), which is the opposite of what we want.
+      # Path-style access is enforced client-side via AWS_S3_FORCE_PATH_STYLE=true.
     volumes:
       - minio-data:/data
     ports:
@@ -293,22 +339,42 @@ services:
   # One-shot container: creates the shared exports bucket.
   # Per-org buckets (org-{org_id}) are created at runtime by the application.
   minio-setup:
-    image: minio/mc:RELEASE.2024-11-21T17-21-54Z
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
     container_name: awakeforest-minio-setup
     restart: "no"
+    tty: true
     depends_on:
       minio:
         condition: service_healthy
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
+      MINIO_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-*}
     entrypoint: >
       /bin/sh -c "
-        mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD;
-        mc mb --ignore-existing local/awakeforest-exports;
-        mc mb --ignore-existing local/awakeforest-jobs;
-        echo '✓ MinIO buckets ready.';
-        exit 0;
+        set -e
+        mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD
+
+        # Create required buckets
+        mc mb --ignore-existing local/awakeforest-exports
+        mc mb --ignore-existing local/awakeforest-jobs
+        mc mb --ignore-existing local/org-00000000-0000-0000-0000-000000000001
+
+        # ---- APPLY ALL GLOBAL CORS SETTINGS IN ONE SHOT ----
+        echo 'Configuring global CORS...'
+        mc admin config set local api \
+          cors_allow_origin=\"$$MINIO_CORS_ALLOW_ORIGIN\" \
+          cors_allow_methods=\"GET,PUT,POST,HEAD\" \
+          cors_allow_headers=\"*\" \
+          cors_expose_headers=\"ETag\" \
+          cors_max_age=\"3600\"
+
+        # Restart MinIO to apply changes
+        echo 'Restarting MinIO...'
+        mc --quiet admin service restart local
+
+        echo '✓ MinIO buckets and global CORS ready.'
+        exit 0
       "
     networks:
       - awakeforest-storage
@@ -319,7 +385,6 @@ services:
   # ============================================================================
   # APPLICATION — FastAPI
   # ============================================================================
-
   api:
     <<: *app-build
     container_name: awakeforest-api
@@ -339,6 +404,8 @@ services:
       redis:
         condition: service_healthy
       minio:
+        condition: service_healthy
+      titiler:
         condition: service_healthy
     networks:
       - awakeforest-backend
@@ -367,11 +434,15 @@ services:
       --queues=ingestion,discovery
       --concurrency=${WORKER_CONCURRENCY_INGESTION:-4}
       --hostname=ingestion@%h
+    volumes:
+      - .:/app  # mount source for development — keeps worker code in sync with API
     depends_on:
       app-db:
         condition: service_healthy
       stac-db:
         condition: service_healthy
+      stac-db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       minio:
@@ -397,6 +468,8 @@ services:
       --queues=bulk
       --concurrency=${WORKER_CONCURRENCY_BULK:-4}
       --hostname=bulk@%h
+    volumes:
+      - .:/app
     depends_on:
       app-db:
         condition: service_healthy
@@ -425,6 +498,8 @@ services:
       --queues=analysis
       --concurrency=${WORKER_CONCURRENCY_ANALYSIS:-4}
       --hostname=analysis@%h
+    volumes:
+      - .:/app
     depends_on:
       app-db:
         condition: service_healthy
@@ -456,6 +531,8 @@ services:
       --queues=inference
       --concurrency=${WORKER_CONCURRENCY_INFERENCE:-2}
       --hostname=inference@%h
+    volumes:
+      - .:/app
     depends_on:
       app-db:
         condition: service_healthy
@@ -483,6 +560,8 @@ services:
       --queues=default
       --concurrency=${WORKER_CONCURRENCY_DEFAULT:-2}
       --hostname=default@%h
+    volumes:
+      - .:/app
     depends_on:
       app-db:
         condition: service_healthy
@@ -507,6 +586,7 @@ services:
       --loglevel=${LOG_LEVEL:-INFO}
       --schedule=/var/celerybeat/celerybeat-schedule
     volumes:
+      - .:/app
       - celerybeat-schedule:/var/celerybeat  # persist schedule file across restarts
     depends_on:
       app-db:
@@ -534,6 +614,8 @@ services:
       celery -A app.workers.celery_app flower
       --port=5555
       --broker_api=redis://:${REDIS_PASSWORD:-redis_pass}@redis:6379/0
+    volumes:
+      - .:/app
     ports:
       - "${FLOWER_PORT:-5555}:5555"
     depends_on:

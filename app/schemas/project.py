@@ -7,7 +7,6 @@ from app.schemas.common import ORMModel, PaginatedResponse
 
 
 class ProjectCreate(ORMModel):
-    organization_id: UUID
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
 

@@ -10,8 +10,8 @@
 # how, not the connection credentials.
 # =============================================================================
 
-# Worker threads — 0 = one per CPU core
-worker_processes: 0
+# Worker threads
+worker_processes: 1
 
 # HTTP keep-alive timeout in seconds
 keep_alive: 75
@@ -19,9 +19,10 @@ keep_alive: 75
 # PostGIS sources — explicit list prevents accidental exposure of system
 # tables, audit logs, or tables with no geometry.
 postgres:
-  # Connection string is overridden by the DATABASE_URL env var at runtime.
-  # Listed here only as documentation of the expected format.
-  # connection_string: "postgresql://martin_reader:<password>@app-db:5432/geoplat"
+  # Martin v1.4+ requires the connection string in the config when a config
+  # file is loaded — DATABASE_URL env var is ignored in that case.
+  # The ${DATABASE_URL} syntax is supported natively by martin's config loader.
+  connection_string: ${DATABASE_URL}
 
   # Maximum pool size per worker
   pool_size: 5
@@ -36,37 +37,11 @@ postgres:
       srid: 4326
       geometry_column: geometry
       geometry_type: Geometry
-      # Columns to include in tile properties (exclude sensitive/internal fields)
-      properties:
-        - id
-        - annotation_set_id
-        - class_id
-        - confidence
-        - deleted_at
 
     # Dataset spatial extents — used for rendering dataset coverage on the map
     datasets:
       schema: public
       table: datasets
       srid: 4326
-      geometry_column: spatial_extent
+      geometry_column: geometry
       geometry_type: Polygon
-      properties:
-        - id
-        - organization_id
-        - name
-        - status
-
-    # Map layer geometries (if any map layers have spatial extent columns)
-    map_layers:
-      schema: public
-      table: map_layers
-      srid: 4326
-      geometry_column: spatial_extent
-      geometry_type: Geometry
-      properties:
-        - id
-        - map_id
-        - name
-        - layer_type
-        - visible

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func, text
+from sqlalchemy import DateTime, Float, ForeignKey, Index, String, Text, func, text, Integer
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -27,6 +27,10 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False)
     config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     input_refs: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    processed_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    progress: Mapped[float | None] = mapped_column(Float, nullable=True)
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

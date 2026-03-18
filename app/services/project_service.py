@@ -59,8 +59,11 @@ class ProjectService:
             raise not_found("Project")
         return project
 
-    async def create_project(self, payload: ProjectCreate, created_by: UUID | None = None) -> Project:
+    async def create_project(
+        self, payload: ProjectCreate, organization_id: UUID, created_by: UUID | None = None
+    ) -> Project:
         data = payload.model_dump()
+        data["organization_id"] = organization_id
         data["created_by"] = created_by
         project = Project(**data)
         self.db.add(project)
@@ -70,7 +73,7 @@ class ProjectService:
             await self.db.rollback()
             logger.warning(
                 "create_project_conflict organization_id=%s name=%s",
-                payload.organization_id,
+                organization_id,
                 payload.name,
             )
             raise conflict("Project creation violates uniqueness or FK constraints") from exc

@@ -61,8 +61,9 @@ class DatasetService:
             raise not_found("Dataset")
         return dataset
 
-    async def create_dataset(self, payload: DatasetCreate) -> Dataset:
+    async def create_dataset(self, payload: DatasetCreate, organization_id: UUID) -> Dataset:
         data = payload.model_dump_db()
+        data["organization_id"] = organization_id
         if data.get("geometry") is not None:
             data["geometry"] = parse_geometry(data["geometry"])
         if "temporal_extent" in data:
@@ -73,7 +74,7 @@ class DatasetService:
             await self.db.commit()
         except IntegrityError as exc:
             await self.db.rollback()
-            logger.warning("create_dataset_conflict organization_id=%s", payload.organization_id)
+            logger.warning("create_dataset_conflict organization_id=%s", organization_id)
             raise conflict("Dataset creation violates uniqueness or FK constraints") from exc
         await self.db.refresh(dataset)
         logger.info("create_dataset_success dataset_id=%s", dataset.id)

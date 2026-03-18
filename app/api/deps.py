@@ -33,12 +33,21 @@ async def get_current_user(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> User:
-    """Upsert the calling user from Clerk JWT claims and return the ORM object."""
+    """Upsert the calling user + org membership from Clerk JWT claims and return the ORM object.
+
+    Everything is done in a single transaction (T1) so that:
+    - The SELECT sees the just-upserted user row without needing a second transaction.
+    - The membership upsert is atomic with the user upsert.
+    - Only one commit() is issued, avoiding the problem where an earlier commit() ends T1
+      and leaves the RLS session variables (set via set_config(..., false)) visible but
+      temporarily detached from the new transaction.
+    """
     claims = request.state.clerk_claims
     clerk_id: str = claims["sub"]
     email: str = claims.get("email", "")
     name: str = claims.get("name", "")
 
+    # 1. Upsert user (INSERT ... ON CONFLICT DO UPDATE)
     await session.execute(
         pg_insert(User.__table__)
         .values(id=uuid.uuid4(), clerk_id=clerk_id, email=email, name=name)
@@ -47,10 +56,35 @@ async def get_current_user(
             set_={"email": email, "name": name},
         )
     )
+
+    # 2. Fetch user in the same transaction (visible because asyncpg reads uncommitted
+    #    writes within the same connection/transaction).
+    result = await session.execute(select(User).where(User.clerk_id == clerk_id))
+    user = result.scalar_one()
+
+    # 3. Upsert org membership if we have an org context.
+    org_uuid_str: str = getattr(request.state, "org_uuid", "")
+    if org_uuid_str:
+        from app.models.organization_member import OrganizationMember  # avoid circular import
+
+        role = _resolve_role(claims)
+        await session.execute(
+            pg_insert(OrganizationMember.__table__)
+            .values(
+                user_id=user.id,
+                organization_id=uuid.UUID(org_uuid_str),
+                role=role,
+            )
+            .on_conflict_do_update(
+                index_elements=["user_id", "organization_id"],
+                set_={"role": role},
+            )
+        )
+
+    # 4. Single commit — flushes user upsert + membership upsert together.
     await session.commit()
 
-    result = await session.execute(select(User).where(User.clerk_id == clerk_id))
-    return result.scalar_one()
+    return user
 
 
 async def get_current_org_id(
@@ -65,17 +99,26 @@ async def get_current_org_id(
 
 
 _ROLE_RANK = {"org:viewer": 0, "org:member": 1, "org:admin": 2}
+_CLERK_ROLE_MAP = {"admin": "org:admin", "member": "org:member", "viewer": "org:viewer"}
+
+
+def _resolve_role(claims: dict) -> str:
+    """Normalize Clerk JWT role from v1 (org_role) or v2 (o.rol) format."""
+    raw = claims.get("org_role") or claims.get("o", {}).get("rol", "")
+    if raw.startswith("org:"):
+        return raw
+    return _CLERK_ROLE_MAP.get(raw, "org:viewer")
 
 
 async def get_current_role(request: Request) -> str:
-    return request.state.clerk_claims.get("org_role", "org:viewer")
+    return _resolve_role(request.state.clerk_claims)
 
 
 def require_role(min_role: str):
     """Dependency factory — raises 403 if the caller's role is below min_role."""
 
     async def _check(request: Request):
-        role = request.state.clerk_claims.get("org_role", "org:viewer")
+        role = _resolve_role(request.state.clerk_claims)
         if _ROLE_RANK.get(role, 0) < _ROLE_RANK.get(min_role, 0):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
@@ -91,7 +134,7 @@ def require_org_role(min_role: str):
     ) -> uuid.UUID:
         if org_id is None:
             raise HTTPException(status_code=403, detail="Organization context required")
-        role = request.state.clerk_claims.get("org_role", "org:viewer")
+        role = _resolve_role(request.state.clerk_claims)
         if _ROLE_RANK.get(role, 0) < _ROLE_RANK.get(min_role, 0):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return org_id

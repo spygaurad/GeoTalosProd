@@ -2,8 +2,9 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.geometry import serialize_geometry
 from app.core.ranges import tstzrange_to_dict
 from app.schemas.common import ORMModel, PaginatedResponse
 
@@ -21,7 +22,6 @@ class _DatasetBase(ORMModel):
 
 
 class DatasetCreate(_DatasetBase):
-    organization_id: UUID
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
     dataset_type: str = Field(min_length=1, max_length=50)
@@ -33,7 +33,6 @@ class DatasetCreate(_DatasetBase):
         validation_alias="metadata_",
         serialization_alias="metadata",
     )
-    created_by: UUID | None = None
 
 
 class DatasetUpdate(_DatasetBase):
@@ -58,6 +57,7 @@ class DatasetRead(ORMModel):
     name: str
     description: str | None
     dataset_type: str
+    status: str
     stac_collection_id: str | None
     geometry: dict | None
     temporal_extent: dict | None
@@ -71,6 +71,11 @@ class DatasetRead(ORMModel):
     updated_at: datetime
     deleted_at: datetime | None
 
+    @field_validator("geometry", mode="before")
+    @classmethod
+    def _coerce_geometry(cls, value: Any) -> dict | None:
+        return serialize_geometry(value)
+
     @field_validator("temporal_extent", mode="before")
     @classmethod
     def _coerce_temporal_extent(cls, value: Any) -> dict | None:
@@ -78,3 +83,59 @@ class DatasetRead(ORMModel):
 
 
 DatasetListResponse = PaginatedResponse[DatasetRead]
+
+
+# ── Upload sub-resource schemas ───────────────────────────────────────────────
+
+_ALLOWED_CONTENT_TYPES = {"image/tiff", "application/zip", "application/x-zip-compressed"}
+
+
+class UploadInitiateRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=512)
+    file_size_bytes: int = Field(gt=0)
+    content_type: str = "image/tiff"
+
+    @field_validator("content_type")
+    @classmethod
+    def _validate_content_type(cls, v: str) -> str:
+        if v not in _ALLOWED_CONTENT_TYPES:
+            raise ValueError(f"content_type must be one of {sorted(_ALLOWED_CONTENT_TYPES)}")
+        return v
+
+
+class UploadPartUrl(BaseModel):
+    part_number: int
+    url: str
+
+
+class UploadInitiateResponse(BaseModel):
+    upload_id: str
+    job_id: UUID
+    s3_key: str
+    part_size_bytes: int
+    total_parts: int
+    part_urls: list[UploadPartUrl]
+
+
+class PartUrlsRequest(BaseModel):
+    part_numbers: list[int] = Field(min_length=1)
+
+
+class PartUrlsResponse(BaseModel):
+    part_urls: list[UploadPartUrl]
+
+
+class UploadPart(BaseModel):
+    part_number: int
+    etag: str
+
+
+class UploadCompleteRequest(BaseModel):
+    # parts is optional: MinIO Community cannot expose ETag via CORS, so
+    # clients may not be able to collect them.  When omitted, the API lists
+    # uploaded parts from MinIO server-side before calling CompleteMultipartUpload.
+    parts: list[UploadPart] | None = None
+
+
+class UploadJobResponse(BaseModel):
+    job_id: UUID

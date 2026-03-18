@@ -26,23 +26,40 @@ from app.models.user import User
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def _map_clerk_role(role: str) -> str:
-    return {"org:admin": "admin", "org:member": "member"}.get(role, "viewer")
-
-
 @router.post("/sync")
 async def sync_session(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ):
     claims = request.state.clerk_claims
+
     clerk_id: str = claims["sub"]
-    clerk_org_id: str | None = claims.get("org_id")
-    clerk_role: str = claims.get("org_role", "org:viewer")
     email: str = claims.get("email", "")
     name: str = claims.get("name", "")
 
-    # ── 1. Upsert user ────────────────────────────────────────────────────────
+    # --- Extract org info, supporting both v1 (flat) and v2 (nested under "o") ---
+    # v2 example: { "o": { "id": "org_xxx", "rol": "admin" } }
+    # v1 example: { "org_id": "org_xxx", "org_role": "org:admin" }
+    clerk_org_id: str | None = claims.get("org_id") or claims.get("o", {}).get("id")
+    raw_role: str | None = claims.get("org_role") or claims.get("o", {}).get("rol")
+
+    # Map Clerk short roles (e.g., "admin") to your internal role strings (e.g., "org:admin")
+    def _map_clerk_role(role: str) -> str:
+        if not role:
+            return "viewer"
+        if role.startswith("org:"):
+            return role
+        # Clerk v2 short roles
+        mapping = {
+            "admin": "org:admin",
+            "member": "org:member",
+            "viewer": "org:viewer",
+        }
+        return mapping.get(role, "org:viewer")
+
+    clerk_role = _map_clerk_role(raw_role)
+
+    # Upsert user
     await session.execute(
         pg_insert(User.__table__)
         .values(id=uuid.uuid4(), clerk_id=clerk_id, email=email, name=name)
@@ -56,7 +73,7 @@ async def sync_session(
     org_row: Organization | None = None
 
     if clerk_org_id:
-        # ── 2. Upsert org ─────────────────────────────────────────────────────
+        # Upsert org
         fallback_slug = f"org-{clerk_org_id}"
         await session.execute(
             pg_insert(Organization.__table__)
@@ -74,17 +91,17 @@ async def sync_session(
             )
         ).scalar_one()
 
-        # ── 3. Upsert membership ──────────────────────────────────────────────
+        # Upsert membership
         await session.execute(
             pg_insert(OrganizationMember.__table__)
             .values(
                 user_id=user_row.id,
                 organization_id=org_row.id,
-                role=_map_clerk_role(clerk_role),
+                role=clerk_role,
             )
             .on_conflict_do_update(
                 index_elements=["user_id", "organization_id"],
-                set_={"role": _map_clerk_role(clerk_role)},
+                set_={"role": clerk_role},
             )
         )
 

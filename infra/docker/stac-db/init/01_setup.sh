@@ -5,9 +5,10 @@
 # The base image (ghcr.io/stac-utils/pgstac:v0.9.10) installs the pgSTAC
 # schema via its own migration, which may run AFTER this script in some
 # versions.  We therefore:
-#   1. Create the roles unconditionally (safe — idempotent DO block).
-#   2. Grant CONNECT on the database.
-#   3. Grant schema-level permissions only if the pgstac schema already
+#   1. Create the PostGIS extension (required by pgSTAC) if not already present.
+#   2. Create the roles unconditionally (safe — idempotent DO block).
+#   3. Grant CONNECT on the database.
+#   4. Grant schema-level permissions only if the pgstac schema already
 #      exists; ALTER DEFAULT PRIVILEGES covers any tables added later.
 #
 # Creates:
@@ -24,6 +25,16 @@ INGEST_PWD="${STAC_INGEST_PASSWORD:-ingest_pass}"
 READ_PWD="${STAC_READ_PASSWORD:-read_pass}"
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-SQL
+
+    ---------------------------------------------------------------------------
+    -- Ensure PostGIS extension is present (required by pgSTAC)
+    ---------------------------------------------------------------------------
+
+    CREATE EXTENSION IF NOT EXISTS postgis;
+    CREATE EXTENSION IF NOT EXISTS btree_gist;
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    CREATE EXTENSION IF NOT EXISTS unaccent;
 
     ---------------------------------------------------------------------------
     -- pgstac_ingest
@@ -99,4 +110,4 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
 
 SQL
 
-echo "✓ stac-db: pgstac_ingest and pgstac_read roles created."
+echo "✓ stac-db: pgstac_ingest and pgstac_read roles created (PostGIS extension ensured)."

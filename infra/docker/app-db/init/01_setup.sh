@@ -98,9 +98,9 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
     GRANT USAGE ON SCHEMA public TO celery_worker;
     GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO celery_worker;
     GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO celery_worker;
-    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    ALTER DEFAULT PRIVILEGES FOR ROLE app_user IN SCHEMA public
         GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO celery_worker;
-    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    ALTER DEFAULT PRIVILEGES FOR ROLE app_user IN SCHEMA public
         GRANT USAGE, SELECT ON SEQUENCES TO celery_worker;
 
     ---------------------------------------------------------------------------
@@ -131,10 +131,14 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
     GRANT USAGE ON SCHEMA public TO martin_reader;
     GRANT SELECT ON ALL TABLES IN SCHEMA public TO martin_reader;
     GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO martin_reader;
-    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    -- Cover tables created by app_user (Alembic migrations)
+    ALTER DEFAULT PRIVILEGES FOR ROLE app_user IN SCHEMA public
         GRANT SELECT ON TABLES TO martin_reader;
-    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    ALTER DEFAULT PRIVILEGES FOR ROLE app_user IN SCHEMA public
         GRANT USAGE, SELECT ON SEQUENCES TO martin_reader;
+    -- Cover tables created by the postgres superuser (extensions, etc.)
+    ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+        GRANT SELECT ON TABLES TO martin_reader;
 
 SQL
 

@@ -1,6 +1,10 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    annotation_classes,
+    annotation_schemas,
+    annotation_sets,
+    annotations,
     auth,
     datasets,
     health,
@@ -11,6 +15,7 @@ from app.api.v1.endpoints import (
     organization_members,
     organizations,
     projects,
+    styles,
     stac,
     tiles,
     users,
@@ -32,3 +37,9 @@ api_router.include_router(models.router)
 api_router.include_router(jobs.router)
 api_router.include_router(stac.router)
 api_router.include_router(tiles.router)
+api_router.include_router(styles.router)
+api_router.include_router(annotation_schemas.router)
+api_router.include_router(annotation_classes.schema_router)
+api_router.include_router(annotation_classes.router)
+api_router.include_router(annotation_sets.router)
+api_router.include_router(annotations.router)

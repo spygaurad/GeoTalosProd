@@ -15,3 +15,5 @@ __pycache__/
 
 combine_code.py
 combine_code.py.save
+
+*.png

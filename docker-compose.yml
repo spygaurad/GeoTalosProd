@@ -386,7 +386,12 @@ services:
   # APPLICATION — FastAPI
   # ============================================================================
   api:
-    <<: *app-build
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_DEV: "true"
+    restart: unless-stopped
     container_name: awakeforest-api
     environment:
       <<: *app-env

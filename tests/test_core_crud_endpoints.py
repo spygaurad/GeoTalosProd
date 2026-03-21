@@ -204,6 +204,7 @@ def test_projects_crud_endpoints(client, monkeypatch):
         name="Project One",
         description="desc",
         created_by=None,
+        default_annotation_schema_id=None,
         deleted_at=None,
         created_at="2026-03-04T00:00:00Z",
         updated_at="2026-03-04T00:00:00Z",

@@ -39,6 +39,9 @@ class MapLayer(Base):
     annotation_set_id: Mapped[uuid.UUID | None] = mapped_column( 
         UUID(as_uuid=True), ForeignKey("annotation_sets.id", ondelete="CASCADE"), nullable=True
     )
+    tile_source_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tile_sources.id", ondelete="SET NULL"), nullable=True
+    )
     style_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("styles.id", ondelete="SET NULL"), nullable=True
     )
@@ -58,4 +61,5 @@ class MapLayer(Base):
 
     map: Mapped["Map"] = relationship("Map", back_populates="layers")
     dataset: Mapped["Dataset | None"] = relationship("Dataset", back_populates="map_layers")
+    tile_source: Mapped["TileSource | None"] = relationship("TileSource")
     style: Mapped["Style | None"] = relationship("Style")

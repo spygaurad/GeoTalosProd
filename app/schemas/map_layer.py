@@ -19,6 +19,7 @@ class MapLayerCreate(ORMModel):
     dataset_id: UUID | None = None
     stac_item_id: str | None = Field(default=None, max_length=255)
     tile_service_url: str | None = Field(default=None, max_length=500)
+    tile_source_id: UUID | None = None
 
     source_config: dict | None = None
     style_id: UUID | None = None
@@ -51,10 +52,10 @@ class MapLayerCreate(ORMModel):
             if self.dataset_id or self.tile_service_url:
                 raise ValueError("Only stac_item_id may be set when source_type is 'stac_item'")
         elif st == "tile_service":
-            if self.tile_service_url is None:
-                raise ValueError("tile_service_url is required when source_type is 'tile_service'")
+            if self.tile_service_url is None and self.tile_source_id is None:
+                raise ValueError("tile_service_url or tile_source_id is required when source_type is 'tile_service'")
             if self.dataset_id or self.stac_item_id:
-                raise ValueError("Only tile_service_url may be set when source_type is 'tile_service'")
+                raise ValueError("Only tile_service_url/tile_source_id may be set when source_type is 'tile_service'")
 
         # zoom range
         if self.min_zoom is not None and self.max_zoom is not None:
@@ -104,6 +105,7 @@ class MapLayerRead(ORMModel):
     dataset_id: UUID | None
     stac_item_id: str | None
     tile_service_url: str | None
+    tile_source_id: UUID | None
     source_config: dict | None
     style_id: UUID | None
     style_override: dict | None

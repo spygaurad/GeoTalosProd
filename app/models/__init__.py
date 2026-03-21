@@ -4,8 +4,10 @@ from app.models.annotation import Annotation
 from app.models.annotation_class import AnnotationClass
 from app.models.annotation_schema import AnnotationSchema
 from app.models.annotation_set import AnnotationSet
+from app.models.basemap import Basemap
 from app.models.dataset import Dataset
 from app.models.dataset_item import DatasetItem
+from app.models.feature_layer import FeatureLayer
 from app.models.job import Job
 from app.models.job_output import JobOutput
 from app.models.map import Map
@@ -14,6 +16,7 @@ from app.models.organization import Organization
 from app.models.organization_member import OrganizationMember
 from app.models.project import Project
 from app.models.style import Style
+from app.models.tile_source import TileSource
 from app.models.user import User
 
 __all__ = [
@@ -23,8 +26,10 @@ __all__ = [
     "AnnotationClass",
     "AnnotationSchema",
     "AnnotationSet",
+    "Basemap",
     "Dataset",
     "DatasetItem",
+    "FeatureLayer",
     "Job",
     "JobOutput",
     "Map",
@@ -33,5 +38,6 @@ __all__ = [
     "OrganizationMember",
     "Project",
     "Style",
+    "TileSource",
     "User",
 ]

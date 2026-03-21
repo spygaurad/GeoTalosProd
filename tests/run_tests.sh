@@ -7,9 +7,8 @@
 set -euo pipefail
 
 CONTAINER="api"
-WORKDIR="/app"
 
-docker compose exec -it "$CONTAINER" python -m pytest \
+docker compose exec -e PYTHONPATH=/app "$CONTAINER" python -m pytest \
   --tb=short \
   -v \
   "${@:-tests/}"

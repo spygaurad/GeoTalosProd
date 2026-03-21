@@ -53,7 +53,9 @@ def client() -> TestClient:
     app.dependency_overrides[get_current_user] = _fake_user
     app.dependency_overrides[get_current_org_id] = _fake_org_id
 
-    with patch.object(ClerkAuthMiddleware, "_is_dev_bypass_allowed", return_value=True):
+    with patch("app.middleware.clerk_auth.settings") as mock_settings, \
+         patch.object(ClerkAuthMiddleware, "_is_dev_bypass_allowed", return_value=True):
+        mock_settings.ENVIRONMENT = "development"
         with TestClient(app) as test_client:
             yield test_client
 

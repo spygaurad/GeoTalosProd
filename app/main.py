@@ -86,14 +86,21 @@ app = FastAPI(title="AwakeForest API", lifespan=lifespan)
 
 # Middleware stack (last added = outermost = runs first).
 # Order: CORS → ClerkAuth → route handler
-app.add_middleware(ClerkAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.BACKEND_CORS_ORIGINS,
+    # allow_origins=[
+    #     "http://34.229.129.135:4173",
+    #     "http://localhost:3000", 
+    #     "http://lovelace.deac.wfu.edu:2024"
+    # ],
+    # allow_origins = ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(ClerkAuthMiddleware)
+
 
 
 @app.middleware("http")

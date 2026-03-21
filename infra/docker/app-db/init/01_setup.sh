@@ -140,6 +140,13 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
     ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
         GRANT SELECT ON TABLES TO martin_reader;
 
+    -- Ensure martin_reader can also read tables/sequences created by
+    -- celery_worker or any other role that may run DDL in the future.
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT SELECT ON TABLES TO martin_reader;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT USAGE, SELECT ON SEQUENCES TO martin_reader;
+
 SQL
 
 echo "✓ app-db:  extensions and roles created (app_user, celery_worker, martin_reader)."

@@ -59,6 +59,10 @@ class ClerkAuthMiddleware(BaseHTTPMiddleware):
     _JWKS_TTL: float = 3600.0  # re-fetch at most once per hour
 
     async def dispatch(self, request: Request, call_next):
+        
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         if request.url.path in EXEMPT_PATHS:
             return await call_next(request)
 

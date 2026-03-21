@@ -103,7 +103,9 @@ def client(mock_db):
     # private-IP check in _is_dev_bypass_allowed, so we patch it to always
     # return True.  The dev bypass then injects _DEV_CLAIMS (org_role=org:admin)
     # which satisfies require_org_role guards without hitting a real Clerk endpoint.
-    with patch.object(ClerkAuthMiddleware, "_is_dev_bypass_allowed", return_value=True):
+    with patch("app.middleware.clerk_auth.settings") as mock_settings, \
+         patch.object(ClerkAuthMiddleware, "_is_dev_bypass_allowed", return_value=True):
+        mock_settings.ENVIRONMENT = "development"
         with TestClient(app, raise_server_exceptions=False) as test_client:
             yield test_client
 

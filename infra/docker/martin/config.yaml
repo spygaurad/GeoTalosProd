@@ -45,3 +45,11 @@ postgres:
       srid: 4326
       geometry_column: geometry
       geometry_type: Polygon
+
+    # Static vector features (roads, buildings, boundaries)
+    feature_layers:
+      schema: public
+      table: feature_layers
+      srid: 4326
+      geometry_column: geometry
+      geometry_type: Geometry

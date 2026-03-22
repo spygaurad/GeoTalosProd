@@ -14,6 +14,7 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
     include=[
         "app.workers.ingestion.tasks",
+        "app.workers.inference.tasks",
     ],
 )
 

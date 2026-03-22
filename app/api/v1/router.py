@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     auth,
     datasets,
     health,
+    inference,
     jobs,
     map_layers,
     maps,
@@ -35,6 +36,7 @@ api_router.include_router(map_layers.router)
 api_router.include_router(datasets.router)
 api_router.include_router(models.router)
 api_router.include_router(jobs.router)
+api_router.include_router(inference.router)
 api_router.include_router(stac.router)
 api_router.include_router(tiles.router)
 api_router.include_router(styles.router)

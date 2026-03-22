@@ -32,12 +32,14 @@ class JobStatus(StrEnum):
 
 class JobType(StrEnum):
     INGEST = "ingest"
+    MODEL_INFERENCE = "model_inference"
 
 
 class MapLayerSourceType(StrEnum):
     DATASET = "dataset"           # full collection mosaic (multi-item)
     STAC_ITEM = "stac_item"       # single STAC item
     TILE_SERVICE = "tile_service" # external XYZ / WMS URL
+    ANNOTATION_SET = "annotation_set"
 
 
 class MapLayerType(StrEnum):

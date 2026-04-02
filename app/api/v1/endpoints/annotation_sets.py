@@ -1,11 +1,12 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_session, require_org_role
 from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
+from app.core.geometry import serialize_geometry
 from app.models.user import User
 from app.schemas.annotation_set import (
     AnnotationSetCreate,
@@ -13,9 +14,16 @@ from app.schemas.annotation_set import (
     AnnotationSetRead,
     AnnotationSetUpdate,
 )
+from app.services.annotation_service import AnnotationService
 from app.services.annotation_set_service import AnnotationSetService
 
 router = APIRouter(prefix="/maps/{map_id}/annotation-sets", tags=["annotation-sets"])
+
+# Standalone router for annotation-set operations by ID (no map_id in path)
+set_router = APIRouter(prefix="/annotation-sets/{set_id}", tags=["annotation-sets"])
+
+# Project-scoped router for listing annotation sets across all maps in a project
+project_router = APIRouter(prefix="/projects/{project_id}/annotation-sets", tags=["annotation-sets"])
 
 
 @router.get("", response_model=AnnotationSetListResponse)
@@ -115,3 +123,64 @@ async def delete_annotation_set(
         entity_id=str(set_id),
         session=db,
     )
+
+
+# ── Project-scoped annotation set list ──────────────────────────────────────
+
+
+@project_router.get("", response_model=AnnotationSetListResponse)
+async def list_project_annotation_sets(
+    project_id: UUID,
+    limit: int = Depends(limit_param),
+    offset: int = Depends(offset_param),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    """List annotation sets across all maps in a project."""
+    service = AnnotationSetService(db)
+    items, total = await service.list_by_project(
+        project_id=project_id, organization_id=org_id, limit=limit, offset=offset
+    )
+    return AnnotationSetListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+# ── Standalone set endpoints (by set_id, no map_id) ───────────────────────────
+
+
+@set_router.get("/features")
+async def get_annotation_set_features(
+    set_id: UUID,
+    limit: int = Query(10000, ge=1, le=10000),
+    offset: int = Depends(offset_param),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    """Return annotations in this set as a GeoJSON FeatureCollection."""
+    ann_service = AnnotationService(db)
+    items, total = await ann_service.list_annotations(
+        set_id=set_id, limit=limit, offset=offset, organization_id=org_id
+    )
+
+    features = []
+    for ann in items:
+        geom = serialize_geometry(ann.geometry)
+        if geom is None:
+            continue
+        features.append({
+            "type": "Feature",
+            "id": str(ann.id),
+            "geometry": geom,
+            "properties": {
+                "class_id": str(ann.class_id),
+                "confidence": ann.confidence,
+                **(ann.properties or {}),
+            },
+        })
+
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "total": total,
+    }

@@ -14,6 +14,11 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
     include=[
         "app.workers.ingestion.tasks",
+        "app.workers.analysis.tasks",
+        "app.workers.automation.tasks",
+        "app.workers.inference.tasks",
+        "app.workers.bulk.tasks",
+        "app.workers.default.tasks",
     ],
 )
 
@@ -27,16 +32,28 @@ celery_app.conf.update(
     # Route tasks to the correct queues based on their module
     task_routes={
         "app.workers.ingestion.tasks.*": {"queue": "ingestion"},
-        "app.workers.discovery.tasks.*": {"queue": "discovery"},
         "app.workers.bulk.tasks.*": {"queue": "bulk"},
         "app.workers.analysis.tasks.*": {"queue": "analysis"},
+        "app.workers.automation.tasks.*": {"queue": "automation"},
         "app.workers.inference.tasks.*": {"queue": "inference"},
+        "app.workers.default.tasks.*": {"queue": "default"},
+
     },
     # Beat schedule
     beat_schedule={
         "refresh-annotation-statistics-hourly": {
             "task": "app.workers.ingestion.tasks.refresh_annotation_statistics",
             "schedule": crontab(minute=0),  # every hour at :00
+            "options": {"queue": "default"},
+        },
+        "cleanup-stale-pending-jobs-hourly": {
+            "task": "app.workers.ingestion.tasks.cleanup_stale_pending_jobs",
+            "schedule": crontab(minute=30),  # every hour at :30
+            "options": {"queue": "default"},
+        },
+        "cleanup-stale-running-jobs-every-2min": {
+            "task": "app.workers.ingestion.tasks.cleanup_stale_running_jobs",
+            "schedule": crontab(minute="*/2"),  # every 2 minutes
             "options": {"queue": "default"},
         },
     },

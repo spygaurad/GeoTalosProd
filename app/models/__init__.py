@@ -18,6 +18,7 @@ from app.models.project import Project
 from app.models.style import Style
 from app.models.tile_source import TileSource
 from app.models.user import User
+from app.models.automation import AutomationPipeline, AutomationRun, AutomationRunStep
 
 __all__ = [
     "ActivityLog",
@@ -40,4 +41,7 @@ __all__ = [
     "Style",
     "TileSource",
     "User",
+    "AutomationPipeline",
+    "AutomationRun",
+    "AutomationRunStep"
 ]

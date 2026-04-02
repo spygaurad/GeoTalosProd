@@ -15,6 +15,18 @@ class AnnotationCreate(ORMModel):
     properties: dict | None = None
 
 
+class AnnotationCreateOnMap(ORMModel):
+    """Create annotation with auto-resolved annotation set."""
+
+    class_id: UUID
+    geometry: dict
+    confidence: float | None = None
+    properties: dict | None = None
+    schema_id: UUID | None = None
+    dataset_id: UUID | None = None
+    set_name: str | None = Field(default=None, max_length=255)
+
+
 class AnnotationUpdate(ORMModel):
     class_id: UUID | None = None
     geometry: dict | None = None
@@ -29,6 +41,8 @@ class AnnotationRead(ORMModel):
     geometry: dict
     confidence: float | None
     properties: dict | None
+    created_by_user_id: UUID | None
+    created_by_job_id: UUID | None
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None

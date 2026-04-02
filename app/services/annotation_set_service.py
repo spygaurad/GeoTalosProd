@@ -83,6 +83,39 @@ class AnnotationSetService:
         total = await self.db.scalar(count_query)
         return rows.all(), int(total or 0)
 
+    async def list_by_project(
+        self,
+        project_id: UUID,
+        organization_id: UUID,
+        limit: int,
+        offset: int,
+    ) -> tuple[Sequence[AnnotationSet], int]:
+        """List annotation sets across all maps in a project."""
+        base_filter = (
+            AnnotationSet.deleted_at.is_(None),
+            Map.project_id == project_id,
+            Project.organization_id == organization_id,
+        )
+        query = (
+            select(AnnotationSet)
+            .join(Map, Map.id == AnnotationSet.map_id)
+            .join(Project, Project.id == Map.project_id)
+            .where(*base_filter)
+            .order_by(AnnotationSet.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        count_query = (
+            select(func.count())
+            .select_from(AnnotationSet)
+            .join(Map, Map.id == AnnotationSet.map_id)
+            .join(Project, Project.id == Map.project_id)
+            .where(*base_filter)
+        )
+        rows = await self.db.scalars(query)
+        total = await self.db.scalar(count_query)
+        return rows.all(), int(total or 0)
+
     async def get_set(
         self, set_id: UUID, organization_id: UUID, map_id: UUID | None = None
     ) -> AnnotationSet:
@@ -158,3 +191,84 @@ class AnnotationSetService:
         annotation_set = await self.get_set(set_id, organization_id, map_id=map_id)
         annotation_set.deleted_at = datetime.now(UTC).replace(tzinfo=None)
         await self.db.commit()
+
+    async def ensure_annotation_set(
+        self,
+        map_id: UUID,
+        organization_id: UUID,
+        created_by_user_id: UUID | None = None,
+        created_by_job_id: UUID | None = None,
+        schema_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        name: str | None = None,
+    ) -> AnnotationSet:
+        """Find an existing annotation set for (map, schema, creator) or create one.
+
+        Used for auto-creating sets when annotations are created without
+        an explicit set.
+        """
+        await self._get_map_for_org(map_id, organization_id)
+
+        # Look for an existing set matching this map + schema + creator
+        query = select(AnnotationSet).where(
+            AnnotationSet.map_id == map_id,
+            AnnotationSet.deleted_at.is_(None),
+        )
+        if schema_id is not None:
+            query = query.where(AnnotationSet.schema_id == schema_id)
+        else:
+            query = query.where(AnnotationSet.schema_id.is_(None))
+
+        if created_by_user_id is not None:
+            query = query.where(AnnotationSet.created_by_user_id == created_by_user_id)
+        elif created_by_job_id is not None:
+            query = query.where(AnnotationSet.created_by_job_id == created_by_job_id)
+
+        result = await self.db.execute(
+            query.order_by(AnnotationSet.created_at.desc()).limit(1)
+        )
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            return existing
+
+        # Validate FK references
+        if schema_id is not None:
+            await self._require_schema_for_org(schema_id, organization_id)
+        if dataset_id is not None:
+            await self._require_dataset_for_org(dataset_id, organization_id)
+
+        # Auto-generate name from schema if not provided
+        if name is None:
+            name = "Annotations"
+            if schema_id is not None:
+                schema_result = await self.db.execute(
+                    select(AnnotationSchema.name).where(
+                        AnnotationSchema.id == schema_id
+                    )
+                )
+                schema_name = schema_result.scalar_one_or_none()
+                if schema_name:
+                    name = f"{schema_name} — Annotations"
+
+        annotation_set = AnnotationSet(
+            map_id=map_id,
+            schema_id=schema_id,
+            dataset_id=dataset_id,
+            name=name,
+            created_by_user_id=created_by_user_id,
+            created_by_job_id=created_by_job_id,
+        )
+        self.db.add(annotation_set)
+        try:
+            await self.db.flush()
+        except IntegrityError as exc:
+            await self.db.rollback()
+            raise conflict("Annotation set could not be created") from exc
+        await self.db.refresh(annotation_set)
+        logger.info(
+            "auto_created_annotation_set id=%s map=%s schema=%s",
+            annotation_set.id,
+            map_id,
+            schema_id,
+        )
+        return annotation_set

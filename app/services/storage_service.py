@@ -326,6 +326,38 @@ def abort_upload(org_id: uuid.UUID, s3_key: str, upload_id: str) -> None:
         pass
 
 
+# ── Object deletion ──────────────────────────────────────────────────────────
+
+def delete_object(org_id: uuid.UUID, s3_key: str) -> None:
+    """Delete a single object from the org bucket.
+
+    No-op if the object does not exist (S3 DeleteObject is idempotent).
+    """
+    client = _s3_client()
+    client.delete_object(Bucket=bucket_name(org_id), Key=s3_key)
+
+
+def delete_objects_by_prefix(org_id: uuid.UUID, prefix: str) -> int:
+    """Delete all objects under *prefix* in the org bucket.
+
+    Returns the number of objects deleted.  Uses batched delete (up to 1000
+    keys per request) for efficiency.
+    """
+    client = _s3_client()
+    bkt = bucket_name(org_id)
+    deleted_count = 0
+
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bkt, Prefix=prefix):
+        objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+        if not objects:
+            continue
+        client.delete_objects(Bucket=bkt, Delete={"Objects": objects, "Quiet": True})
+        deleted_count += len(objects)
+
+    return deleted_count
+
+
 # ── Download presigning ───────────────────────────────────────────────────────
 
 def generate_download_url(
@@ -346,3 +378,76 @@ def generate_download_url(
         },
         ExpiresIn=ttl_seconds,
     )
+
+
+# ── Stale upload cleanup ─────────────────────────────────────────────────────
+
+def list_stale_multipart_uploads(
+    org_id: uuid.UUID,
+    older_than_hours: int = 24,
+) -> list[dict]:
+    """List multipart uploads older than *older_than_hours*.
+
+    Returns a list of ``{"Key": str, "UploadId": str, "Initiated": datetime}``
+    dicts for uploads that can be safely aborted.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    client = _s3_client()
+    bkt = bucket_name(org_id)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+    stale: list[dict] = []
+
+    try:
+        paginator = client.get_paginator("list_multipart_uploads")
+        for page in paginator.paginate(Bucket=bkt):
+            for upload in page.get("Uploads", []):
+                initiated = upload.get("Initiated")
+                if initiated and initiated < cutoff:
+                    stale.append({
+                        "Key": upload["Key"],
+                        "UploadId": upload["UploadId"],
+                        "Initiated": initiated,
+                    })
+    except ClientError as exc:
+        # Bucket may not exist yet if org never uploaded anything
+        if exc.response["Error"]["Code"] in ("404", "NoSuchBucket"):
+            return []
+        raise
+
+    return stale
+
+
+def abort_stale_multipart_uploads(
+    org_id: uuid.UUID,
+    older_than_hours: int = 24,
+) -> int:
+    """Abort all multipart uploads older than *older_than_hours*.
+
+    Returns the number of uploads aborted. Safe to call repeatedly.
+    """
+    stale = list_stale_multipart_uploads(org_id, older_than_hours)
+    if not stale:
+        return 0
+
+    client = _s3_client()
+    bkt = bucket_name(org_id)
+    aborted = 0
+
+    for upload in stale:
+        try:
+            client.abort_multipart_upload(
+                Bucket=bkt,
+                Key=upload["Key"],
+                UploadId=upload["UploadId"],
+            )
+            aborted += 1
+            _log.info(
+                "aborted_stale_upload bucket=%s key=%s upload_id=%s initiated=%s",
+                bkt, upload["Key"], upload["UploadId"], upload["Initiated"],
+            )
+        except ClientError:
+            # Already aborted or completed — safe to ignore
+            pass
+
+    return aborted

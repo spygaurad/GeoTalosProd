@@ -58,10 +58,11 @@ x-app-env: &app-env
   # Internal service URLs
   STAC_API_URL: http://stac-api:8080
   TITILER_URL: http://titiler:8000
+  TITILER_WORKERS: ${TITILER_WORKERS:-2}
   # Public URL of the main API — used to rewrite TiTiler tile URLs in tilejson
   # responses so browsers call the tile proxy instead of titiler directly.
   # Override in staging/production with the real domain (no trailing slash).
-  PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:2024}
+  PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:2030}
   # MinIO (S3-compatible) — path-style access for local use
   AWS_ENDPOINT_URL: http://minio:9000
   AWS_REGION: ${AWS_REGION:-us-east-1}
@@ -213,13 +214,15 @@ services:
     # platform: linux/amd64
     container_name: awakeforest-titiler
     restart: unless-stopped
-    mem_limit: 3g
+    mem_limit: 12g
     command: >
       gunicorn -k uvicorn.workers.UvicornWorker
       titiler.pgstac.main:app
       --bind 0.0.0.0:8000
       --workers ${TITILER_WORKERS:-2}
       --timeout 120
+      --access-logfile -
+      --access-logformat '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(D)s'
     environment:
       PGUSER: pgstac_read
       PGPASSWORD: ${STAC_READ_PASSWORD:-read_pass}
@@ -500,7 +503,7 @@ services:
     command: >
       celery -A app.workers.celery_app worker
       --loglevel=${LOG_LEVEL:-INFO}
-      --queues=analysis
+      --queues=analysis,automation
       --concurrency=${WORKER_CONCURRENCY_ANALYSIS:-4}
       --hostname=analysis@%h
     volumes:

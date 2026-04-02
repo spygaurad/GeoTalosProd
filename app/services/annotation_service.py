@@ -16,7 +16,8 @@ from app.models.annotation_schema import AnnotationSchema
 from app.models.annotation_set import AnnotationSet
 from app.models.map import Map
 from app.models.project import Project
-from app.schemas.annotation import AnnotationCreate, AnnotationUpdate
+from app.schemas.annotation import AnnotationCreate, AnnotationCreateOnMap, AnnotationUpdate
+from app.services.annotation_set_service import AnnotationSetService
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,9 @@ class AnnotationService:
         set_id: UUID,
         payload: AnnotationCreate,
         organization_id: UUID,
+        *,
+        created_by_user_id: UUID | None = None,
+        created_by_job_id: UUID | None = None,
     ) -> Annotation:
         annotation_set = await self._get_set_for_org(set_id, organization_id)
         cls, schema = await self._get_class_and_schema(payload.class_id, organization_id)
@@ -139,10 +143,61 @@ class AnnotationService:
 
         self._validate_geometry(payload.geometry, schema.geometry_types)
 
+        if created_by_user_id is None and created_by_job_id is None:
+            raise bad_request("Either created_by_user_id or created_by_job_id is required")
+
         data = payload.model_dump()
         data["annotation_set_id"] = set_id
         data["geometry"] = parse_geometry(payload.geometry)
+        data["created_by_user_id"] = created_by_user_id
+        data["created_by_job_id"] = created_by_job_id
         annotation = Annotation(**data)
+        self.db.add(annotation)
+        try:
+            await self.db.commit()
+        except IntegrityError as exc:
+            await self.db.rollback()
+            raise conflict("Annotation violates constraints") from exc
+        await self.db.refresh(annotation)
+        return annotation
+
+    async def create_annotation_on_map(
+        self,
+        map_id: UUID,
+        payload: AnnotationCreateOnMap,
+        organization_id: UUID,
+        user_id: UUID,
+    ) -> Annotation:
+        """Create an annotation with auto-resolved annotation set.
+
+        Finds or creates an annotation set for the given map + schema + user,
+        then creates the annotation within it.
+        """
+        cls, schema = await self._get_class_and_schema(payload.class_id, organization_id)
+
+        # Use the class's schema if caller didn't specify one
+        schema_id = payload.schema_id or cls.schema_id
+
+        self._validate_geometry(payload.geometry, schema.geometry_types)
+
+        set_service = AnnotationSetService(self.db)
+        annotation_set = await set_service.ensure_annotation_set(
+            map_id=map_id,
+            organization_id=organization_id,
+            created_by_user_id=user_id,
+            schema_id=schema_id,
+            dataset_id=payload.dataset_id,
+            name=payload.set_name,
+        )
+
+        annotation = Annotation(
+            annotation_set_id=annotation_set.id,
+            class_id=payload.class_id,
+            geometry=parse_geometry(payload.geometry),
+            confidence=payload.confidence,
+            properties=payload.properties,
+            created_by_user_id=user_id,
+        )
         self.db.add(annotation)
         try:
             await self.db.commit()

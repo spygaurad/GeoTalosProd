@@ -208,41 +208,77 @@ async def get_dataset_item_tile_config(
     db: AsyncSession = Depends(get_session),
     _current_user: User = Depends(get_current_user),
 ):
-    """Return stable tile URL template for a single dataset item.
+    """Return stable tile URL template for a single dataset item (by DB UUID).
 
+    Uses the titiler items endpoint (``/collections/{cid}/items/{iid}/tiles/...``).
     The ``tile_url_template`` points at the API's own tile proxy so the
     browser never needs a direct connection to titiler.  The frontend
     substitutes ``{z}``, ``{x}``, ``{y}`` and may append titiler render
     params (``assets``, ``rescale``, ``colormap``, etc.) as query params.
     """
-    from sqlalchemy import select  # noqa: PLC0415
+    return await _build_item_tile_config(db, dataset_id, org_id, item_id=item_id)
+
+
+@router.get("/{dataset_id}/items/by-stac-id/{stac_item_id}/tile-config", response_model=DatasetItemTileConfig)
+async def get_dataset_item_tile_config_by_stac_id(
+    dataset_id: UUID,
+    stac_item_id: str,
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    """Return stable tile URL template for a single dataset item (by STAC item ID string).
+
+    Same as the UUID variant but accepts the STAC item ID string, which is
+    what the frontend has when restoring saved map layers from the backend.
+    """
+    return await _build_item_tile_config(db, dataset_id, org_id, stac_item_id=stac_item_id)
+
+
+async def _build_item_tile_config(
+    db: AsyncSession,
+    dataset_id: UUID,
+    org_id: UUID,
+    *,
+    item_id: UUID | None = None,
+    stac_item_id: str | None = None,
+) -> DatasetItemTileConfig:
+    """Shared logic for both tile-config endpoint variants."""
     from app.config import settings as _settings  # noqa: PLC0415
-    import urllib.parse  # noqa: PLC0415
 
     # Verify dataset ownership
     service = DatasetService(db)
     await service.get_dataset(dataset_id, organization_id=org_id)
 
-    result = await db.execute(
-        select(DatasetItem).where(
-            DatasetItem.id == item_id,
-            DatasetItem.dataset_id == dataset_id,
-            DatasetItem.is_active.is_(True),
-        )
-    )
+    filters = [
+        DatasetItem.dataset_id == dataset_id,
+        DatasetItem.is_active.is_(True),
+    ]
+    if item_id is not None:
+        filters.append(DatasetItem.id == item_id)
+    elif stac_item_id is not None:
+        filters.append(DatasetItem.stac_item_id == stac_item_id)
+    else:
+        raise HTTPException(status_code=400, detail="item_id or stac_item_id required")
+
+    result = await db.execute(select(DatasetItem).where(*filters))
     item = result.scalar_one_or_none()
     if item is None:
         raise HTTPException(status_code=404, detail="Dataset item not found")
 
     base = _settings.PUBLIC_API_URL.rstrip("/")
-    encoded_uri = urllib.parse.quote(item.s3_uri, safe="")
     tile_url_template = (
-        f"{base}/api/v1/tiles/stac/{{z}}/{{x}}/{{y}}.png?url={encoded_uri}"
+        f"{base}/api/v1/tiles/collections/{item.stac_collection_id}"
+        f"/items/{item.stac_item_id}/{{z}}/{{x}}/{{y}}.png"
     )
+    # Include pre-computed rendering config from the item's properties_cache
+    rendering_config = (item.properties_cache or {}).get("rendering_config")
+
     return DatasetItemTileConfig(
         stac_item_id=item.stac_item_id,
         dataset_id=dataset_id,
         tile_url_template=tile_url_template,
+        rendering_config=rendering_config,
     )
 
 
@@ -253,18 +289,31 @@ async def get_dataset_item_tile_config(
 async def get_dataset_tilejson(
     dataset_id: UUID,
     assets: str | None = Query(default=None, description="Comma-separated asset names, e.g. B04,B03,B02"),
+    rescale: str | None = Query(default=None, description="Min,max rescale range (e.g. '0,10000'). Auto-detected for uint16 data if not provided."),
+    asset_bidx: str | None = Query(default=None, description="Band selection (e.g. 'data|1,2,3'). Auto-detected for 4+ band uint16 data if not provided."),
+    preset: str | None = Query(default=None, description="Rendering preset name (e.g. 'natural_color', 'ndvi', 'false_color'). Uses default preset if not specified."),
     org_id: UUID = Depends(require_org_role("org:viewer")),
     db: AsyncSession = Depends(get_session),
     _current_user: User = Depends(get_current_user),
 ):
     """Return a TileJSON document for rendering this dataset on Leaflet/MapLibre.
 
-    Tile URLs in the response are rewritten to go through the API tile proxy
-    (``GET /api/v1/tiles/mosaic/{searchid}/...``) so that auth is enforced on
-    every tile request and no additional public port is needed.
+    Uses the titiler collections endpoint (no search registration needed).
+    Tile URLs are rewritten to go through the API tile proxy
+    (``GET /api/v1/tiles/collections/{cid}/...``) so that auth is enforced
+    on every tile request and no additional public port is needed.
 
     The dataset must have ``status = 'ready'`` (ingestion complete) before
     tiles can be served.
+
+    **Rendering presets**: If the dataset was ingested with rendering metadata,
+    the response includes ``rendering.available_presets`` listing all supported
+    band combinations (natural_color, ndvi, false_color, etc.). Pass ``preset``
+    to switch between them.
+
+    **Auto-rescaling**: For uint16 data, rendering params (rescale, band selection)
+    are resolved from cached metadata or auto-detected from titiler. Override
+    with explicit ``rescale`` or ``asset_bidx``.
     """
     service = DatasetService(db)
     dataset = await service.get_dataset(dataset_id, organization_id=org_id)
@@ -277,15 +326,21 @@ async def get_dataset_tilejson(
     if not dataset.stac_collection_id:
         raise HTTPException(status_code=409, detail="Dataset has no STAC collection registered")
 
+    # Use pre-computed rendering config from dataset metadata (zero titiler calls)
+    rendering_config = (dataset.metadata_ or {}).get("rendering_config")
+
     try:
-        searchid = await titiler_service.register_collection_mosaic(dataset.stac_collection_id)
-        tilejson = await titiler_service.get_mosaic_tilejson(
-            searchid,
+        tilejson = await titiler_service.get_collection_tilejson(
+            dataset.stac_collection_id,
             assets=assets,
+            rendering_config=rendering_config,
+            preset=preset,
+            rescale=rescale,
+            asset_bidx=asset_bidx,
         )
     except RuntimeError as exc:
         msg = str(exc)
-        if "not found" in msg.lower() or "no items" in msg.lower():
+        if "404" in msg or "not found" in msg.lower() or "not exist" in msg.lower():
             raise HTTPException(status_code=404, detail=msg) from exc
         if "timed out" in msg.lower():
             raise HTTPException(status_code=504, detail=msg) from exc
@@ -293,7 +348,11 @@ async def get_dataset_tilejson(
             raise HTTPException(status_code=503, detail=msg) from exc
         raise HTTPException(status_code=502, detail=f"Tile service error: {msg}") from exc
 
-    return {**tilejson, "dataset_id": str(dataset_id), "searchid": searchid}
+    return {
+        **tilejson,
+        "dataset_id": str(dataset_id),
+        "collection_id": dataset.stac_collection_id,
+    }
 
 # ── Upload sub-resources ──────────────────────────────────────────────────────
 

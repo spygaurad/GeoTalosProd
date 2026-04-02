@@ -6,8 +6,10 @@ from app.api.v1.endpoints import (
     annotation_sets,
     annotations,
     auth,
+    automation,
     basemaps,
     datasets,
+    events,
     feature_layers,
     health,
     jobs,
@@ -19,6 +21,7 @@ from app.api.v1.endpoints import (
     projects,
     styles,
     stac,
+    storage_download,
     tile_sources,
     tiles,
     users,
@@ -45,7 +48,13 @@ api_router.include_router(annotation_schemas.router)
 api_router.include_router(annotation_classes.schema_router)
 api_router.include_router(annotation_classes.router)
 api_router.include_router(annotation_sets.router)
+api_router.include_router(annotation_sets.project_router)
+api_router.include_router(annotation_sets.set_router)
 api_router.include_router(annotations.router)
+api_router.include_router(annotations.map_router)
 api_router.include_router(basemaps.router)
 api_router.include_router(tile_sources.router)
 api_router.include_router(feature_layers.router)
+api_router.include_router(automation.router)
+api_router.include_router(storage_download.router)
+api_router.include_router(events.router)

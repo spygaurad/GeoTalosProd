@@ -9,6 +9,7 @@ from app.core.deps import limit_param, offset_param
 from app.models.user import User
 from app.schemas.annotation import (
     AnnotationCreate,
+    AnnotationCreateOnMap,
     AnnotationListResponse,
     AnnotationRead,
     AnnotationUpdate,
@@ -16,6 +17,9 @@ from app.schemas.annotation import (
 from app.services.annotation_service import AnnotationService
 
 router = APIRouter(prefix="/annotation-sets/{set_id}/annotations", tags=["annotations"])
+
+# Map-level router for auto-resolved annotation set creation
+map_router = APIRouter(prefix="/maps/{map_id}/annotations", tags=["annotations"])
 
 
 @router.get("", response_model=AnnotationListResponse)
@@ -55,7 +59,12 @@ async def create_annotation(
     current_user: User = Depends(get_current_user),
 ):
     service = AnnotationService(db)
-    annotation = await service.create_annotation(set_id, payload, organization_id=org_id)
+    annotation = await service.create_annotation(
+        set_id,
+        payload,
+        organization_id=org_id,
+        created_by_user_id=current_user.id,
+    )
     await log_audit_event(
         action="annotations.create",
         actor_id=str(current_user.id),
@@ -109,3 +118,37 @@ async def delete_annotation(
         entity_id=str(annotation_id),
         session=db,
     )
+
+
+# ── Map-level: auto-create annotation set ────────────────────────────────────
+
+
+@map_router.post("", response_model=AnnotationRead, status_code=status.HTTP_201_CREATED)
+async def create_annotation_on_map(
+    map_id: UUID,
+    payload: AnnotationCreateOnMap,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Create an annotation on a map with auto-resolved annotation set.
+
+    If no annotation set exists for this map + schema + user, one is
+    created automatically.
+    """
+    service = AnnotationService(db)
+    annotation = await service.create_annotation_on_map(
+        map_id=map_id,
+        payload=payload,
+        organization_id=org_id,
+        user_id=current_user.id,
+    )
+    await log_audit_event(
+        action="annotations.create",
+        actor_id=str(current_user.id),
+        organization_id=str(org_id),
+        entity="annotation",
+        entity_id=str(annotation.id),
+        session=db,
+    )
+    return annotation

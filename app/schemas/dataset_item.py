@@ -25,7 +25,7 @@ DatasetItemListResponse = PaginatedResponse[DatasetItemRead]
 
 
 class DatasetItemTileConfig(ORMModel):
-    """Stable identifiers for the frontend to build tile requests."""
+    """Stable identifiers + rendering config for the frontend to build tile requests."""
 
     stac_item_id: str
     dataset_id: UUID
@@ -33,4 +33,12 @@ class DatasetItemTileConfig(ORMModel):
     # {z}, {x}, {y} and appends any titiler render params (assets, rescale…)
     tile_url_template: str = Field(
         description="URL template for raster tiles. Substitute {z}/{x}/{y}."
+    )
+    rendering_config: dict | None = Field(
+        default=None,
+        description=(
+            "Pre-computed rendering metadata: data_category, band stats, "
+            "available presets (natural_color, ndvi, false_color, etc.) "
+            "with ready-to-use titiler query params."
+        ),
     )

@@ -35,4 +35,14 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+    annotation_set_links: Mapped[list["ProjectAnnotationSet"]] = relationship(
+        "ProjectAnnotationSet",
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    dataset_links: Mapped[list["ProjectDataset"]] = relationship(
+        "ProjectDataset",
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
     creator: Mapped["User | None"] = relationship("User", foreign_keys=[created_by])

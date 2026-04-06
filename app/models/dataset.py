@@ -47,4 +47,9 @@ class Dataset(Base):
         back_populates="dataset",
         cascade="all, delete-orphan",
     )
+    project_links: Mapped[list["ProjectDataset"]] = relationship(
+        "ProjectDataset",
+        back_populates="dataset",
+        cascade="all, delete-orphan",
+    )
     creator: Mapped["User | None"] = relationship("User", foreign_keys=[created_by])

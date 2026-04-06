@@ -15,10 +15,9 @@ class MapLayer(Base):
         Index("idx_map_layers_dataset", "dataset_id"),
         Index("idx_map_layers_style", "style_id"),
         CheckConstraint(
-            "(source_type = 'dataset' AND dataset_id IS NOT NULL AND stac_item_id IS NULL AND tile_service_url IS NULL AND annotation_set_id IS NULL) OR "
-            "(source_type = 'stac_item' AND stac_item_id IS NOT NULL AND dataset_id IS NULL AND tile_service_url IS NULL AND annotation_set_id IS NULL) OR "
-            "(source_type = 'tile_service' AND tile_service_url IS NOT NULL AND dataset_id IS NULL AND stac_item_id IS NULL AND annotation_set_id IS NULL) OR "
-            "(source_type = 'annotation_set' AND annotation_set_id IS NOT NULL AND dataset_id IS NULL AND stac_item_id IS NULL AND tile_service_url IS NULL)",
+            "(source_type = 'dataset' AND dataset_id IS NOT NULL AND stac_item_id IS NULL AND tile_service_url IS NULL) OR "
+            "(source_type = 'stac_item' AND stac_item_id IS NOT NULL AND dataset_id IS NULL AND tile_service_url IS NULL) OR "
+            "(source_type = 'tile_service' AND tile_service_url IS NOT NULL AND dataset_id IS NULL AND stac_item_id IS NULL)",
             name="ck_map_layers_source",
         ),
     )
@@ -36,9 +35,6 @@ class MapLayer(Base):
     stac_item_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tile_service_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     source_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    annotation_set_id: Mapped[uuid.UUID | None] = mapped_column( 
-        UUID(as_uuid=True), ForeignKey("annotation_sets.id", ondelete="CASCADE"), nullable=True
-    )
     style_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("styles.id", ondelete="SET NULL"), nullable=True
     )

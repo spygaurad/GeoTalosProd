@@ -9,10 +9,14 @@ from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.models.job_output import JobOutput
 from app.models.map import Map
+from app.models.map_annotation_set import MapAnnotationSet
 from app.models.map_layer import MapLayer
+from app.models.model_class_mapping import ModelClassMapping
 from app.models.organization import Organization
 from app.models.organization_member import OrganizationMember
 from app.models.project import Project
+from app.models.project_annotation_set import ProjectAnnotationSet
+from app.models.project_dataset import ProjectDataset
 from app.models.style import Style
 from app.models.user import User
 
@@ -28,10 +32,14 @@ __all__ = [
     "Job",
     "JobOutput",
     "Map",
+    "MapAnnotationSet",
     "MapLayer",
+    "ModelClassMapping",
     "Organization",
     "OrganizationMember",
     "Project",
+    "ProjectAnnotationSet",
+    "ProjectDataset",
     "Style",
     "User",
 ]

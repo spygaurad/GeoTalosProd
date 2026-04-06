@@ -96,6 +96,7 @@ services:
 
   app-db:
     image: postgis/postgis:17-3.5
+    platform: linux/amd64
     container_name: awakeforest-app-db
     restart: unless-stopped
     environment:

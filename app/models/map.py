@@ -36,8 +36,8 @@ class Map(Base):
         back_populates="map",
         cascade="all, delete-orphan",
     )
-    annotation_sets: Mapped[list["AnnotationSet"]] = relationship(
-        "AnnotationSet",
+    annotation_set_mounts: Mapped[list["MapAnnotationSet"]] = relationship(
+        "MapAnnotationSet",
         back_populates="map",
         cascade="all, delete-orphan",
     )

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import bad_request, conflict, not_found
 from app.models.map import Map
 from app.models.map_layer import MapLayer
+from app.models.project_dataset import ProjectDataset
 from app.models.project import Project
 from app.schemas.map_layer import MapLayerCreate, MapLayerUpdate
 
@@ -71,11 +72,23 @@ class MapLayerService:
     async def create_layer(
         self, map_id: UUID, organization_id: UUID, payload: MapLayerCreate
     ) -> MapLayer:
-        await self._get_map_for_org(map_id, organization_id)
+        map_row = await self._get_map_for_org(map_id, organization_id)
         data = payload.model_dump()
         data["map_id"] = map_id
         layer = MapLayer(**data)
         self.db.add(layer)
+        if payload.dataset_id is not None:
+            existing_link = await self.db.get(
+                ProjectDataset,
+                {"project_id": map_row.project_id, "dataset_id": payload.dataset_id},
+            )
+            if existing_link is None:
+                self.db.add(
+                    ProjectDataset(
+                        project_id=map_row.project_id,
+                        dataset_id=payload.dataset_id,
+                    )
+                )
         try:
             await self.db.commit()
         except IntegrityError as exc:

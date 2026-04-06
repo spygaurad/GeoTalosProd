@@ -12,6 +12,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     POETRY_VERSION=1.8.4 \
     POETRY_HOME=/opt/poetry \
     POETRY_CACHE_DIR=/opt/.cache \
+    PIP_DEFAULT_TIMEOUT=180 \
+    POETRY_REQUESTS_TIMEOUT=180 \
     PATH="/opt/poetry/bin:${PATH}"
 
 # System deps — curl for poetry installer, build-essential for any src wheels
@@ -33,7 +35,16 @@ COPY pyproject.toml poetry.lock* ./
 
 # Install Python dependencies into the system Python (no virtualenv in container)
 RUN poetry config virtualenvs.create false \
-    && poetry install --no-interaction --no-ansi --no-root --without dev
+    && poetry config installer.max-workers 4 \
+    && ok=0 \
+    && for i in 1 2 3; do \
+        if poetry install --no-interaction --no-ansi --no-root --without dev; then \
+            ok=1; break; \
+        fi; \
+        echo "poetry install failed (attempt $i), retrying..."; \
+        sleep 20; \
+    done \
+    && test "$ok" -eq 1
 
 # Copy application source
 COPY . .

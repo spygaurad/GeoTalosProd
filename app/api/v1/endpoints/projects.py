@@ -1,18 +1,23 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import distinct, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_session, require_org_role
 from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
 from app.models.dataset import Dataset
-from app.models.map import Map
-from app.models.map_layer import MapLayer
+from app.models.project_dataset import ProjectDataset
 from app.models.user import User
 from app.schemas.dataset import DatasetListResponse, DatasetRead
-from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectRead, ProjectUpdate
+from app.schemas.project import (
+    ProjectCreate,
+    ProjectDatasetLinkRequest,
+    ProjectListResponse,
+    ProjectRead,
+    ProjectUpdate,
+)
 from app.services.project_service import ProjectService
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -118,34 +123,24 @@ async def list_project_datasets(
     db: AsyncSession = Depends(get_session),
     _current_user: User = Depends(get_current_user),
 ):
-    """List all distinct datasets used by any layer in any map in this project.
-
-    This is a convenience endpoint so the frontend doesn't have to traverse
-    maps → layers → datasets client-side.
-    """
-    # Verify the project belongs to this org
     service = ProjectService(db)
     await service.get_project(project_id, organization_id=org_id)
 
     base_query = (
         select(Dataset)
-        .join(MapLayer, MapLayer.dataset_id == Dataset.id)
-        .join(Map, Map.id == MapLayer.map_id)
+        .join(ProjectDataset, ProjectDataset.dataset_id == Dataset.id)
         .where(
-            Map.project_id == project_id,
-            Map.deleted_at.is_(None),
+            ProjectDataset.project_id == project_id,
             Dataset.organization_id == org_id,
             Dataset.deleted_at.is_(None),
         )
-        .distinct()
     )
     count_query = (
-        select(distinct(Dataset.id))
-        .join(MapLayer, MapLayer.dataset_id == Dataset.id)
-        .join(Map, Map.id == MapLayer.map_id)
+        select(func.count())
+        .select_from(ProjectDataset)
+        .join(Dataset, Dataset.id == ProjectDataset.dataset_id)
         .where(
-            Map.project_id == project_id,
-            Map.deleted_at.is_(None),
+            ProjectDataset.project_id == project_id,
             Dataset.organization_id == org_id,
             Dataset.deleted_at.is_(None),
         )
@@ -154,9 +149,81 @@ async def list_project_datasets(
     rows = await db.scalars(
         base_query.order_by(Dataset.created_at.desc()).limit(limit).offset(offset)
     )
-    total_rows = await db.execute(count_query)
-    total = len(total_rows.all())
+    total = int(await db.scalar(count_query) or 0)
 
     return DatasetListResponse(
         items=rows.all(), total=total, limit=limit, offset=offset
+    )
+
+
+@router.post("/{project_id}/datasets/link", response_model=DatasetRead, status_code=status.HTTP_201_CREATED)
+async def link_project_dataset(
+    project_id: UUID,
+    payload: ProjectDatasetLinkRequest,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    service = ProjectService(db)
+    await service.get_project(project_id, organization_id=org_id)
+
+    dataset = await db.scalar(
+        select(Dataset).where(
+            Dataset.id == payload.dataset_id,
+            Dataset.organization_id == org_id,
+            Dataset.deleted_at.is_(None),
+        )
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    existing = await db.get(
+        ProjectDataset,
+        {"project_id": project_id, "dataset_id": payload.dataset_id},
+    )
+    if existing is None:
+        db.add(
+            ProjectDataset(
+                project_id=project_id,
+                dataset_id=payload.dataset_id,
+                linked_by=current_user.id,
+            )
+        )
+        await db.commit()
+
+    await log_audit_event(
+        action="projects.datasets.link",
+        actor_id=str(current_user.id),
+        organization_id=str(org_id),
+        entity="project_dataset",
+        entity_id=f"{project_id}:{payload.dataset_id}",
+        session=db,
+    )
+    return DatasetRead.model_validate(dataset)
+
+
+@router.delete("/{project_id}/datasets/{dataset_id}/unlink", status_code=status.HTTP_204_NO_CONTENT)
+async def unlink_project_dataset(
+    project_id: UUID,
+    dataset_id: UUID,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    service = ProjectService(db)
+    await service.get_project(project_id, organization_id=org_id)
+
+    link = await db.get(ProjectDataset, {"project_id": project_id, "dataset_id": dataset_id})
+    if link is None:
+        raise HTTPException(status_code=404, detail="Project dataset link not found")
+    await db.delete(link)
+    await db.commit()
+
+    await log_audit_event(
+        action="projects.datasets.unlink",
+        actor_id=str(current_user.id),
+        organization_id=str(org_id),
+        entity="project_dataset",
+        entity_id=f"{project_id}:{dataset_id}",
+        session=db,
     )

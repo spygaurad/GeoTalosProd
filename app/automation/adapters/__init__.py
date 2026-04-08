@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from app.automation.adapters.base import OutputAdapter
-from app.automation.adapters import coco_adapter, geojson_adapter, platform_adapter, yolo_adapter
+from app.automation.adapters import (
+    coco_adapter,
+    geojson_adapter,
+    platform_adapter,
+    sam3_adapter,
+    yolo_adapter,
+)
 
 
 ADAPTER_REGISTRY: dict[str, OutputAdapter] = {
@@ -54,6 +60,24 @@ ADAPTER_REGISTRY: dict[str, OutputAdapter] = {
             },
         },
         convert_fn=coco_adapter.convert,
+    ),
+    "sam3_to_platform": OutputAdapter(
+        name="sam3_to_platform",
+        label="SAM3",
+        description="Converts SAM3 outputs (masks/polygons/bboxes) to platform standard.",
+        supported_formats=["sam3"],
+        config_schema={
+            "type": "object",
+            "properties": {
+                "label_field": {"type": "string", "default": "label"},
+                "score_field": {"type": "string", "default": "score"},
+                "polygon_field": {"type": "string", "default": "polygon"},
+                "bbox_field": {"type": "string", "default": "bbox"},
+                "default_label": {"type": "string", "default": "object"},
+                "min_score": {"type": "number", "default": 0.0},
+            },
+        },
+        convert_fn=sam3_adapter.convert,
     ),
 }
 

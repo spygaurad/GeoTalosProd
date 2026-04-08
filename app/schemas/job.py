@@ -30,3 +30,6 @@ class InferenceJobCreate(ORMModel):
     project_id: UUID | None = None
     map_id: UUID | None = None
     mount_on_map: bool = False
+    patch_size_px: int | None = Field(default=None, ge=64, le=4096)
+    stride_px: int | None = Field(default=None, ge=32, le=4096)
+    max_patches_per_item: int | None = Field(default=None, ge=1, le=4096)

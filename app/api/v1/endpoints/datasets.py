@@ -29,7 +29,12 @@ from app.schemas.dataset import (
     UploadPartUrl,
 )
 from app.schemas.dataset_item import DatasetItemListResponse, DatasetItemTileConfig
+from app.schemas.dataset_item import (
+    DatasetItemPatchGenerateRequest,
+    DatasetItemPatchGenerateResponse,
+)
 from app.services.dataset_service import DatasetService
+from app.services.patch_service import PatchService
 from app.services import storage_service
 from app.services import titiler_service
 
@@ -243,6 +248,73 @@ async def get_dataset_item_tile_config(
         stac_item_id=item.stac_item_id,
         dataset_id=dataset_id,
         tile_url_template=tile_url_template,
+    )
+
+
+@router.post(
+    "/{dataset_id}/items/{item_id}/patches/generate",
+    response_model=DatasetItemPatchGenerateResponse,
+)
+async def generate_dataset_item_patches(
+    dataset_id: UUID,
+    item_id: UUID,
+    payload: DatasetItemPatchGenerateRequest,
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    """Generate patch windows for a dataset item.
+
+    This endpoint only returns patch descriptors (pixel window + geo bbox).
+    It does not create files or run inference.
+    """
+    service = DatasetService(db)
+    await service.get_dataset(dataset_id, organization_id=org_id)
+
+    result = await db.execute(
+        select(DatasetItem).where(
+            DatasetItem.id == item_id,
+            DatasetItem.dataset_id == dataset_id,
+            DatasetItem.organization_id == org_id,
+            DatasetItem.is_active.is_(True),
+        )
+    )
+    item = result.scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Dataset item not found")
+
+    props = item.properties_cache or {}
+    proj_shape = props.get("proj:shape") or []
+    height = proj_shape[0] if isinstance(proj_shape, list) and len(proj_shape) == 2 else None
+    width = proj_shape[1] if isinstance(proj_shape, list) and len(proj_shape) == 2 else None
+    item_bbox = [0.0, 0.0, 0.0, 0.0]
+    if isinstance(item.geometry, dict):
+        coords = item.geometry.get("coordinates")
+        geom_type = item.geometry.get("type")
+        if geom_type and coords:
+            from shapely.geometry import shape  # noqa: PLC0415
+
+            shp = shape(item.geometry)
+            item_bbox = [float(v) for v in shp.bounds]
+
+    try:
+        patches, capped = PatchService.generate(
+            item_id=str(item.id),
+            item_bbox=item_bbox,
+            item_width=width,
+            item_height=height,
+            patch_size_px=payload.patch_size_px,
+            stride_px=payload.stride_px,
+            max_patches=payload.max_patches,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return DatasetItemPatchGenerateResponse(
+        dataset_id=dataset_id,
+        item_id=item_id,
+        total_patches=len(patches),
+        capped=capped,
+        patches=[p.as_dict() for p in patches],
     )
 
 

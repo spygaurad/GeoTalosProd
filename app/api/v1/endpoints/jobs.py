@@ -78,6 +78,19 @@ async def create_inference_job(
             "mount_on_map": payload.mount_on_map,
         }
     )
+    if payload.patch_size_px is not None:
+        run_output_config["patch_size_px"] = payload.patch_size_px
+    if payload.stride_px is not None:
+        effective_patch_size = payload.patch_size_px
+        if effective_patch_size is None:
+            effective_patch_size = int((model.output_config or {}).get("patch_size_px", 1024))
+        if payload.stride_px > effective_patch_size:
+            raise HTTPException(
+                status_code=422, detail="stride_px cannot be greater than patch_size_px"
+            )
+        run_output_config["stride_px"] = payload.stride_px
+    if payload.max_patches_per_item is not None:
+        run_output_config["max_patches_per_item"] = payload.max_patches_per_item
 
     job = Job(
         organization_id=org_id,

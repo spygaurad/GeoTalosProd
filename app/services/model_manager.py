@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from urllib import request
+from urllib import parse, request
 from uuid import UUID
 
 from shapely.geometry import shape
@@ -13,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.automation.adapters import get_adapter
+from app.config import settings
 from app.core.enums import JobStatus
 from app.core.geometry import parse_geometry
 from app.models.ai_model import AIModel
@@ -26,6 +28,7 @@ from app.models.map_annotation_set import MapAnnotationSet
 from app.models.model_class_mapping import ModelClassMapping
 from app.models.project import Project
 from app.models.project_annotation_set import ProjectAnnotationSet
+from app.services.patch_service import PatchService
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +41,10 @@ class InferenceResult:
 
 
 class ModelManager:
-    """Central inference orchestrator: model call -> adapter -> class mapping -> annotations."""
+    """Central inference orchestrator: patch -> model -> adapter -> annotations."""
+
+    _DEFAULT_PATCH_SIZE = 1024
+    _DEFAULT_MAX_PATCHES = 1024
 
     def __init__(self, session: Session):
         self.session = session
@@ -65,11 +71,70 @@ class ModelManager:
             "properties_cache": props,
         }
 
+    def _build_patch_metadata(
+        self,
+        *,
+        item: DatasetItem,
+        context: dict[str, Any],
+        output_cfg: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], bool]:
+        patch_size_px = int(output_cfg.get("patch_size_px", self._DEFAULT_PATCH_SIZE))
+        stride_px_cfg = output_cfg.get("stride_px")
+        stride_px = int(stride_px_cfg) if stride_px_cfg is not None else None
+        max_patches = int(output_cfg.get("max_patches_per_item", self._DEFAULT_MAX_PATCHES))
+
+        windows, capped = PatchService.generate(
+            item_id=str(item.id),
+            item_bbox=context["bbox"],
+            item_width=context.get("width"),
+            item_height=context.get("height"),
+            patch_size_px=patch_size_px,
+            stride_px=stride_px,
+            max_patches=max_patches,
+        )
+        return [w.as_dict() for w in windows], capped
+
+    def _fetch_patch_png(
+        self,
+        *,
+        item: DatasetItem,
+        patch: dict[str, Any],
+        asset_name: str = "data",
+    ) -> str:
+        """Fetch patch PNG bytes from TiTiler and return base64 payload."""
+        bbox = patch.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            raise ValueError("Patch bbox is required")
+
+        width_px = int(patch.get("width_px") or 0)
+        height_px = int(patch.get("height_px") or 0)
+        if width_px <= 0 or height_px <= 0:
+            raise ValueError("Patch pixel dimensions must be > 0")
+
+        bbox_csv = ",".join(str(float(v)) for v in bbox)
+        dim_part = f"{width_px}x{height_px}.png"
+        base_url = settings.TITILER_URL.rstrip("/")
+        endpoint = (
+            f"{base_url}/collections/{item.stac_collection_id}"
+            f"/items/{item.stac_item_id}/bbox/{bbox_csv}/{dim_part}"
+        )
+        query = parse.urlencode({"assets": asset_name})
+        crop_url = f"{endpoint}?{query}"
+
+        req = request.Request(crop_url, method="GET")
+        with request.urlopen(req, timeout=60.0) as resp:  # nosec B310
+            data = resp.read()
+            if not data:
+                raise ValueError("Empty patch image from TiTiler")
+            return base64.b64encode(data).decode("ascii")
+
     def _call_model(
         self,
         model: AIModel,
         item: DatasetItem,
         georef_context: dict[str, Any],
+        patch: dict[str, Any],
+        patch_image_base64: str,
     ) -> Any:
         output_config = model.output_config or {}
         if "mock_raw_output" in output_config:
@@ -84,6 +149,9 @@ class ModelManager:
             "s3_uri": item.s3_uri,
             "filename": item.filename,
             "georef_metadata": georef_context,
+            "patch": patch,
+            "patch_image_format": "png",
+            "patch_image_base64": patch_image_base64,
         }
         req_cfg = model.request_config or {}
         if isinstance(req_cfg.get("payload"), dict):
@@ -102,7 +170,7 @@ class ModelManager:
             method=str(req_cfg.get("method", "POST")).upper(),
         )
         timeout = float(req_cfg.get("timeout_seconds", 60))
-        with request.urlopen(req, timeout=timeout) as resp:  # nosec B310 - controlled URL from DB config
+        with request.urlopen(req, timeout=timeout) as resp:  # nosec B310
             raw = resp.read().decode("utf-8")
             return json.loads(raw)
 
@@ -133,6 +201,7 @@ class ModelManager:
         run_cfg = (job.config or {}).get("run_output_config")
         if isinstance(run_cfg, dict):
             output_cfg.update(run_cfg)
+
         adapter_name = output_cfg.get("adapter", "platform_passthrough")
         adapter_config = output_cfg.get("adapter_config") or {}
         adapter = get_adapter(adapter_name)
@@ -140,6 +209,7 @@ class ModelManager:
         project_id = output_cfg.get("project_id")
         map_id = output_cfg.get("map_id")
         mount_on_map = bool(output_cfg.get("mount_on_map", False))
+        patch_asset = str(output_cfg.get("patch_asset", "data"))
         model_meta = {
             "model_id": str(model.id),
             "model_name": model.name,
@@ -162,11 +232,14 @@ class ModelManager:
             if item is None or item.organization_id != job.organization_id or not item.is_active:
                 failed += 1
                 continue
+
             try:
                 context = self._dataset_item_context(item)
-                raw_output = self._call_model(model, item, context)
-                normalized = adapter.convert_fn(raw_output, adapter_config, context)
-                predictions = normalized.get("predictions") or []
+                patch_metadata, capped = self._build_patch_metadata(
+                    item=item,
+                    context=context,
+                    output_cfg=output_cfg,
+                )
 
                 annotation_set = AnnotationSet(
                     organization_id=job.organization_id,
@@ -208,40 +281,76 @@ class ModelManager:
                             )
 
                 created_annotations = 0
-                for pred in predictions:
-                    label = str(pred.get("label", ""))
-                    mapping = mapping_by_label.get(label)
-                    if mapping is None:
-                        continue
-                    confidence = float(pred.get("confidence", 1.0) or 1.0)
-                    if (
-                        mapping.confidence_threshold is not None
-                        and confidence < mapping.confidence_threshold
-                    ):
-                        continue
-                    geom = pred.get("geometry")
-                    if not isinstance(geom, dict):
-                        continue
-                    geom_4326 = self._validate_geojson_4326(geom)
-                    properties = dict(pred.get("properties") or {})
-                    properties.update(
-                        {
-                            "source_label": label,
-                            "georef_metadata": context,
-                            "model_meta": model_meta,
-                        }
-                    )
-                    self.session.add(
-                        Annotation(
-                            annotation_set_id=annotation_set.id,
-                            class_id=mapping.annotation_class_id,
-                            geometry=parse_geometry(geom_4326),
-                            confidence=confidence,
-                            properties=properties,
-                            created_by_job_id=job.id,
+                for patch in patch_metadata:
+                    patch_context = {
+                        **context,
+                        "bbox": patch["bbox"],
+                        "width": patch["width_px"],
+                        "height": patch["height_px"],
+                        "patch": patch,
+                        "parent_bbox": context["bbox"],
+                        "parent_width": context.get("width"),
+                        "parent_height": context.get("height"),
+                    }
+                    try:
+                        patch_png_b64 = self._fetch_patch_png(
+                            item=item,
+                            patch=patch,
+                            asset_name=patch_asset,
                         )
-                    )
-                    created_annotations += 1
+                        raw_output = self._call_model(
+                            model=model,
+                            item=item,
+                            georef_context=patch_context,
+                            patch=patch,
+                            patch_image_base64=patch_png_b64,
+                        )
+                        normalized = adapter.convert_fn(raw_output, adapter_config, patch_context)
+                        predictions = normalized.get("predictions") or []
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "inference_patch_failed job_id=%s item_id=%s patch_id=%s error=%s",
+                            job.id,
+                            item.id,
+                            patch.get("patch_id"),
+                            exc,
+                        )
+                        continue
+
+                    for pred in predictions:
+                        label = str(pred.get("label", ""))
+                        mapping = mapping_by_label.get(label)
+                        if mapping is None:
+                            continue
+                        confidence = float(pred.get("confidence", 1.0) or 1.0)
+                        if (
+                            mapping.confidence_threshold is not None
+                            and confidence < mapping.confidence_threshold
+                        ):
+                            continue
+                        geom = pred.get("geometry")
+                        if not isinstance(geom, dict):
+                            continue
+                        geom_4326 = self._validate_geojson_4326(geom)
+                        properties = dict(pred.get("properties") or {})
+                        properties.update(
+                            {
+                                "source_label": label,
+                                "georef_metadata": patch_context,
+                                "model_meta": model_meta,
+                                "patch": patch,
+                            }
+                        )
+                        self.session.add(
+                            Annotation(
+                                annotation_set_id=annotation_set.id,
+                                class_id=mapping.annotation_class_id,
+                                geometry=parse_geometry(geom_4326),
+                                confidence=confidence,
+                                properties=properties,
+                            )
+                        )
+                        created_annotations += 1
 
                 self.session.add(
                     JobOutput(
@@ -254,9 +363,11 @@ class ModelManager:
                 output_set_ids.append(annotation_set.id)
                 processed += 1
                 logger.info(
-                    "inference_item_processed job_id=%s item_id=%s created_annotations=%s",
+                    "inference_item_processed job_id=%s item_id=%s patches=%s patches_capped=%s created_annotations=%s",
                     job.id,
                     item.id,
+                    len(patch_metadata),
+                    capped,
                     created_annotations,
                 )
             except Exception as exc:  # noqa: BLE001

@@ -14,8 +14,6 @@ from app.models.annotation import Annotation
 from app.models.annotation_class import AnnotationClass
 from app.models.annotation_schema import AnnotationSchema
 from app.models.annotation_set import AnnotationSet
-from app.models.map import Map
-from app.models.project import Project
 from app.schemas.annotation import AnnotationCreate, AnnotationUpdate
 
 logger = logging.getLogger(__name__)
@@ -36,12 +34,10 @@ class AnnotationService:
     ) -> AnnotationSet:
         result = await self.db.execute(
             select(AnnotationSet)
-            .join(Map, Map.id == AnnotationSet.map_id)
-            .join(Project, Project.id == Map.project_id)
             .where(
                 AnnotationSet.id == set_id,
                 AnnotationSet.deleted_at.is_(None),
-                Project.organization_id == organization_id,
+                AnnotationSet.organization_id == organization_id,
             )
         )
         annotation_set = result.scalar_one_or_none()
@@ -109,12 +105,10 @@ class AnnotationService:
         query = (
             select(Annotation)
             .join(AnnotationSet, AnnotationSet.id == Annotation.annotation_set_id)
-            .join(Map, Map.id == AnnotationSet.map_id)
-            .join(Project, Project.id == Map.project_id)
             .where(
                 Annotation.id == annotation_id,
                 Annotation.deleted_at.is_(None),
-                Project.organization_id == organization_id,
+                AnnotationSet.organization_id == organization_id,
             )
         )
         if set_id is not None:

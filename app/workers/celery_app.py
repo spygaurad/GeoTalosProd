@@ -14,6 +14,7 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
     include=[
         "app.workers.ingestion.tasks",
+        "app.workers.inference.tasks",
     ],
 )
 
@@ -38,6 +39,16 @@ celery_app.conf.update(
             "task": "app.workers.ingestion.tasks.refresh_annotation_statistics",
             "schedule": crontab(minute=0),  # every hour at :00
             "options": {"queue": "default"},
+        },
+        "cleanup-stale-jobs-every-15m": {
+            "task": "app.workers.ingestion.tasks.cleanup_stale_jobs",
+            "schedule": crontab(minute="*/15"),
+            "options": {"queue": "ingestion"},
+        },
+        "cleanup-terminal-job-artifacts-daily": {
+            "task": "app.workers.ingestion.tasks.cleanup_terminal_job_artifacts",
+            "schedule": crontab(minute=30, hour=2),
+            "options": {"queue": "ingestion"},
         },
     },
 )

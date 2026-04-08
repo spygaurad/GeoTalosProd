@@ -26,7 +26,13 @@ class AIModel(Base):
     auth_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     input_schema: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     output_schema: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    output_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    annotation_schema_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("annotation_schemas.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -40,4 +46,12 @@ class AIModel(Base):
 
     organization: Mapped["Organization"] = relationship("Organization", back_populates="ai_models")
     creator: Mapped["User | None"] = relationship("User", foreign_keys=[created_by])
+    annotation_schema: Mapped["AnnotationSchema | None"] = relationship(
+        "AnnotationSchema", foreign_keys=[annotation_schema_id]
+    )
     jobs: Mapped[list["Job"]] = relationship("Job", back_populates="model")
+    class_mappings: Mapped[list["ModelClassMapping"]] = relationship(
+        "ModelClassMapping",
+        back_populates="model",
+        cascade="all, delete-orphan",
+    )

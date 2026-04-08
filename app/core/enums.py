@@ -32,6 +32,7 @@ class JobStatus(StrEnum):
 
 class JobType(StrEnum):
     INGEST = "ingest"
+    INFERENCE = "inference"
 
 
 class MapLayerSourceType(StrEnum):

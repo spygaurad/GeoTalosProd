@@ -29,3 +29,7 @@ class ProjectRead(ORMModel):
 
 
 ProjectListResponse = PaginatedResponse[ProjectRead]
+
+
+class ProjectDatasetLinkRequest(ORMModel):
+    dataset_id: UUID

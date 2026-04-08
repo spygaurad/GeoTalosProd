@@ -326,6 +326,21 @@ def abort_upload(org_id: uuid.UUID, s3_key: str, upload_id: str) -> None:
         pass
 
 
+def delete_object(org_id: uuid.UUID, s3_key: str) -> None:
+    """Delete an object from MinIO/S3.
+
+    Safe/idempotent: missing keys are ignored.
+    """
+    client = _s3_client()
+    try:
+        client.delete_object(Bucket=bucket_name(org_id), Key=s3_key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code in {"NoSuchKey", "404", "NoSuchBucket"}:
+            return
+        raise
+
+
 # ── Download presigning ───────────────────────────────────────────────────────
 
 def generate_download_url(

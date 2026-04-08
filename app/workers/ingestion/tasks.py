@@ -10,7 +10,7 @@ import os
 import tempfile
 import uuid
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import boto3
 from botocore.client import Config
@@ -91,6 +91,39 @@ def _file_hash(file_path: str) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             sha256.update(chunk)
     return sha256.hexdigest()
+
+
+def _append_job_log(job: Job, message: str) -> None:
+    job.logs = f"{job.logs}\n{message}" if job.logs else message
+
+
+def _safe_gc_ingest_object_for_job(session, job: Job) -> str:
+    """Delete ingest object if it is not referenced by dataset_items."""
+    cfg = job.config or {}
+    s3_key = cfg.get("s3_key")
+    if not s3_key:
+        return "skipped:no_s3_key"
+
+    bucket = storage_service.bucket_name(job.organization_id)
+    s3_uri = f"s3://{bucket}/{s3_key}"
+    referenced = session.execute(
+        text("SELECT 1 FROM dataset_items WHERE s3_uri = :uri LIMIT 1"),
+        {"uri": s3_uri},
+    ).scalar_one_or_none()
+    if referenced is not None:
+        return "skipped:referenced_by_dataset_item"
+
+    try:
+        storage_service.delete_object(job.organization_id, s3_key)
+        return "deleted"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "job_storage_gc_delete_failed job_id=%s s3_key=%s error=%s",
+            job.id,
+            s3_key,
+            exc,
+        )
+        return f"error:{exc}"
 
 # --- Core Logic ---
 
@@ -417,3 +450,112 @@ def refresh_annotation_statistics():
         )
         session.commit()
     logger.info("annotation_statistics materialized view refreshed")
+
+
+@celery_app.task(ignore_result=True, queue=INGESTION)
+def cleanup_stale_jobs() -> None:
+    """Fail stale jobs and abort dangling multipart uploads."""
+    now = _now()
+    pending_cutoff = now - timedelta(minutes=settings.JOB_STALE_PENDING_MINUTES)
+    running_cutoff = now - timedelta(minutes=settings.JOB_STALE_RUNNING_MINUTES)
+
+    with WorkerSession() as session:
+        stale_pending = session.execute(
+            text(
+                """
+                SELECT id FROM jobs
+                WHERE status IN ('pending', 'queued')
+                  AND created_at < :cutoff
+                """
+            ),
+            {"cutoff": pending_cutoff},
+        ).scalars().all()
+
+        stale_running = session.execute(
+            text(
+                """
+                SELECT id FROM jobs
+                WHERE status = 'running'
+                  AND started_at IS NOT NULL
+                  AND started_at < :cutoff
+                """
+            ),
+            {"cutoff": running_cutoff},
+        ).scalars().all()
+
+        stale_ids = [*stale_pending, *stale_running]
+        if not stale_ids:
+            return
+
+        for jid in stale_ids:
+            job = session.get(Job, jid)
+            if job is None:
+                continue
+            cfg = dict(job.config or {})
+            upload_id = cfg.get("upload_id")
+            s3_key = cfg.get("s3_key")
+            if upload_id and s3_key:
+                try:
+                    storage_service.abort_upload(job.organization_id, s3_key, upload_id)
+                except Exception:  # noqa: BLE001
+                    logger.exception("stale_job_abort_upload_failed job_id=%s", job.id)
+            job.status = JobStatus.FAILED
+            job.finished_at = now
+            _append_job_log(job, "Auto-failed by cleanup_stale_jobs due to timeout.")
+            cfg["auto_failed_reason"] = "timeout_stale"
+            cfg["auto_failed_at"] = now.isoformat()
+            job.config = cfg
+
+        session.commit()
+        logger.warning("cleanup_stale_jobs_marked_failed=%s", len(stale_ids))
+
+
+@celery_app.task(ignore_result=True, queue=INGESTION)
+def cleanup_terminal_job_artifacts() -> None:
+    """Garbage-collect MinIO artifacts for old failed/cancelled jobs."""
+    now = _now()
+    failed_cutoff = now - timedelta(days=settings.JOB_FAILED_RETENTION_DAYS)
+    cancelled_cutoff = now - timedelta(days=settings.JOB_CANCELLED_RETENTION_DAYS)
+
+    with WorkerSession() as session:
+        jobs = session.execute(
+            text(
+                """
+                SELECT id FROM jobs
+                WHERE (
+                        status = 'failed'
+                        AND finished_at IS NOT NULL
+                        AND finished_at < :failed_cutoff
+                      )
+                   OR (
+                        status = 'cancelled'
+                        AND finished_at IS NOT NULL
+                        AND finished_at < :cancelled_cutoff
+                      )
+                """
+            ),
+            {"failed_cutoff": failed_cutoff, "cancelled_cutoff": cancelled_cutoff},
+        ).scalars().all()
+
+        processed = 0
+        for jid in jobs:
+            job = session.get(Job, jid)
+            if job is None:
+                continue
+            cfg = dict(job.config or {})
+            if cfg.get("storage_gc_done") is True:
+                continue
+
+            gc_result = "skipped:not_ingest"
+            if job.type == "ingest":
+                gc_result = _safe_gc_ingest_object_for_job(session, job)
+
+            cfg["storage_gc_done"] = True
+            cfg["storage_gc_result"] = gc_result
+            cfg["storage_gc_at"] = now.isoformat()
+            job.config = cfg
+            processed += 1
+
+        if processed:
+            session.commit()
+            logger.info("cleanup_terminal_job_artifacts_processed=%s", processed)

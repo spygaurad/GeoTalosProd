@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     PUBLIC_API_URL: str = ""
     MINIO_CORS_ALLOW_ORIGIN: str = ""
 
+    # ── Job cleanup policy ────────────────────────────────────────────────────
+    JOB_STALE_PENDING_MINUTES: int = 60
+    JOB_STALE_RUNNING_MINUTES: int = 30
+    JOB_FAILED_RETENTION_DAYS: int = 7
+    JOB_CANCELLED_RETENTION_DAYS: int = 7
+
 
     model_config = SettingsConfigDict(
         env_file=".env",

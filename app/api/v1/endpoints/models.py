@@ -7,7 +7,15 @@ from app.api.deps import get_current_user, get_session, require_org_role
 from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
 from app.models.user import User
-from app.schemas.ai_model import AIModelCreate, AIModelListResponse, AIModelRead, AIModelUpdate
+from app.schemas.ai_model import (
+    AIModelCreate,
+    AIModelListResponse,
+    AIModelRead,
+    AIModelUpdate,
+    ModelClassMappingCreate,
+    ModelClassMappingListResponse,
+    ModelClassMappingRead,
+)
 from app.services.model_service import AIModelService
 
 router = APIRouter(prefix="/models", tags=["models"])
@@ -102,5 +110,90 @@ async def delete_model_by_id(
         organization_id=str(org_id),
         entity="model",
         entity_id=str(model_id),
+        session=db,
+    )
+
+
+@router.get("/{model_id}/class-mappings", response_model=ModelClassMappingListResponse)
+async def list_model_class_mappings(
+    model_id: UUID,
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    service = AIModelService(db)
+    items = await service.list_class_mappings(model_id, organization_id=org_id)
+    return ModelClassMappingListResponse(
+        items=[ModelClassMappingRead.model_validate(item) for item in items],
+        total=len(items),
+    )
+
+
+@router.post("/{model_id}/class-mappings", response_model=ModelClassMappingListResponse)
+async def upsert_model_class_mappings(
+    model_id: UUID,
+    payload: list[ModelClassMappingCreate],
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    service = AIModelService(db)
+    items = await service.upsert_class_mappings(model_id, payload, organization_id=org_id)
+    await log_audit_event(
+        action="models.class_mappings.upsert",
+        actor_id=str(current_user.id),
+        organization_id=str(org_id),
+        entity="model",
+        entity_id=str(model_id),
+        extra={"count": len(items)},
+        session=db,
+    )
+    return ModelClassMappingListResponse(
+        items=[ModelClassMappingRead.model_validate(item) for item in items],
+        total=len(items),
+    )
+
+
+@router.put("/{model_id}/class-mappings", response_model=ModelClassMappingListResponse)
+async def replace_model_class_mappings(
+    model_id: UUID,
+    payload: list[ModelClassMappingCreate],
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    service = AIModelService(db)
+    items = await service.replace_class_mappings(model_id, payload, organization_id=org_id)
+    await log_audit_event(
+        action="models.class_mappings.replace",
+        actor_id=str(current_user.id),
+        organization_id=str(org_id),
+        entity="model",
+        entity_id=str(model_id),
+        extra={"count": len(items)},
+        session=db,
+    )
+    return ModelClassMappingListResponse(
+        items=[ModelClassMappingRead.model_validate(item) for item in items],
+        total=len(items),
+    )
+
+
+@router.delete("/{model_id}/class-mappings/{mapping_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_model_class_mapping(
+    model_id: UUID,
+    mapping_id: UUID,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    service = AIModelService(db)
+    await service.delete_class_mapping(model_id, mapping_id, organization_id=org_id)
+    await log_audit_event(
+        action="models.class_mappings.delete",
+        actor_id=str(current_user.id),
+        organization_id=str(org_id),
+        entity="model_class_mapping",
+        entity_id=str(mapping_id),
         session=db,
     )

@@ -46,6 +46,5 @@ class AnnotationSchema(Base):
     annotation_sets: Mapped[list["AnnotationSet"]] = relationship(
         "AnnotationSet",
         back_populates="schema",
-        cascade="all, delete-orphan",
     )
     creator: Mapped["User | None"] = relationship("User", foreign_keys=[created_by])

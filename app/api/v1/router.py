@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    adapters,
     annotation_classes,
     annotation_schemas,
     annotation_sets,
@@ -42,4 +43,7 @@ api_router.include_router(annotation_schemas.router)
 api_router.include_router(annotation_classes.schema_router)
 api_router.include_router(annotation_classes.router)
 api_router.include_router(annotation_sets.router)
+api_router.include_router(annotation_sets.project_router)
+api_router.include_router(annotation_sets.map_router)
 api_router.include_router(annotations.router)
+api_router.include_router(adapters.router)

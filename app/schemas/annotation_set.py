@@ -7,7 +7,7 @@ from app.schemas.common import ORMModel, PaginatedResponse
 
 
 class AnnotationSetCreate(ORMModel):
-    map_id: UUID
+    map_id: UUID | None = None
     schema_id: UUID | None = None
     dataset_id: UUID | None = None
     stac_item_id: str | None = Field(default=None, max_length=255)
@@ -25,7 +25,7 @@ class AnnotationSetUpdate(ORMModel):
 
 class AnnotationSetRead(ORMModel):
     id: UUID
-    map_id: UUID
+    map_id: UUID | None
     schema_id: UUID | None
     dataset_id: UUID | None
     stac_item_id: str | None

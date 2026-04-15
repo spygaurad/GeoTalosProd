@@ -25,8 +25,8 @@ class AnnotationSet(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    map_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("maps.id", ondelete="CASCADE"), nullable=False
+    map_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("maps.id", ondelete="CASCADE"), nullable=True
     )
     schema_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("annotation_schemas.id"), nullable=True
@@ -51,7 +51,7 @@ class AnnotationSet(Base):
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    map: Mapped["Map"] = relationship("Map", back_populates="annotation_sets")
+    map: Mapped["Map | None"] = relationship("Map", back_populates="annotation_sets")
     schema: Mapped["AnnotationSchema"] = relationship("AnnotationSchema", back_populates="annotation_sets")
     dataset: Mapped["Dataset | None"] = relationship("Dataset", back_populates="annotation_sets")
     creator_user: Mapped["User | None"] = relationship("User", foreign_keys=[created_by_user_id])

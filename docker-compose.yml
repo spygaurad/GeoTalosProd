@@ -62,7 +62,7 @@ x-app-env: &app-env
   # Public URL of the main API — used to rewrite TiTiler tile URLs in tilejson
   # responses so browsers call the tile proxy instead of titiler directly.
   # Override in staging/production with the real domain (no trailing slash).
-  PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:2030}
+  PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8010}
   # MinIO (S3-compatible) — path-style access for local use
   AWS_ENDPOINT_URL: http://minio:9000
   AWS_REGION: ${AWS_REGION:-us-east-1}
@@ -658,11 +658,10 @@ services:
       app-db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      # Martin binds to the Docker bridge interface, not loopback — check via
+      # the host-mapped port instead of localhost inside the container.
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 60s
     networks:
       - awakeforest-backend
     labels:

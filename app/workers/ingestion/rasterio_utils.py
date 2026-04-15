@@ -106,32 +106,116 @@ def _vsi_path(s3_uri: str) -> str:
     return s3_uri.replace("s3://", "/vsis3/", 1)
 
 
+def _extract_datetime_from_filename_patterns(
+    filename_or_path: str,
+) -> tuple[str | None, str | None]:
+    """Extract datetime(s) from filename patterns, including hash-prefixed names.
+
+    Supports:
+    1. YYYYMMDDTHHMMSSZ_[name].tif         → single datetime
+    2. YYYYMMDDTHHMMSSZ_YYYYMMDDTHHMMSSZ_[name].tif → datetime range (start, end)
+
+    Returns (datetime_str, end_datetime_str) or (None, None) if no match.
+    Both datetimes are returned as ISO-8601 UTC strings.
+    """
+    basename = os.path.basename(filename_or_path or "")
+    # Accept '_'/'-'/'.' separators so hashed ZIP member names still match.
+    ts_token = r"\d{8}T\d{6}[Zz]"
+
+    # Pattern 2: timestamp range
+    match_range = re.search(
+        rf"(?<!\d)({ts_token})[_\-.]+({ts_token})(?!\d)",
+        basename,
+    )
+    if match_range:
+        try:
+            start_str, end_str = match_range.groups()
+            # Parse compact ISO format: YYYYMMDDTHHMMSSZ
+            start_dt = datetime.strptime(start_str.upper(), "%Y%m%dT%H%M%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            end_dt = datetime.strptime(end_str.upper(), "%Y%m%dT%H%M%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            return start_dt.isoformat(), end_dt.isoformat()
+        except ValueError:
+            pass
+
+    # Pattern 1: single timestamp
+    match_single = re.search(rf"(?<!\d)({ts_token})(?!\d)", basename)
+    if match_single:
+        try:
+            ts_str = match_single.group(1)
+            dt = datetime.strptime(ts_str.upper(), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            return dt.isoformat(), None
+        except ValueError:
+            pass
+
+    return None, None
+
+
 def _extract_datetime(tags: dict, filename: str) -> str:
     """Return an ISO-8601 UTC datetime string for the image acquisition time.
 
     Sources tried in order:
-    1. TIFFTAG_DATETIME (format ``YYYY:MM:DD HH:MM:SS``)
-    2. ACQUISITIONDATETIME, DATE, date_acquired, acquisition_date metadata tags
-    3. ISO date ``YYYY-MM-DD`` anywhere in the filename
-    4. Compact date ``YYYYMMDD`` anywhere in the filename
-    5. Year-month ``YYYY-MM`` anywhere in the filename (defaults to 1st of month)
-    6. Current UTC time (logged as a warning)
+    1. Filename patterns: YYYYMMDDTHHMMSSZ_[name] or YYYYMMDDTHHMMSSZ_YYYYMMDDTHHMMSSZ_[name]
+    2. TIFFTAG_DATETIME (format ``YYYY:MM:DD HH:MM:SS``)
+    3. ACQUISITIONDATETIME, DATE, date_acquired, acquisition_date metadata tags
+    4. ISO date ``YYYY-MM-DD`` anywhere in the filename
+    5. Compact date ``YYYYMMDD`` anywhere in the filename
+    6. Year-month ``YYYY-MM`` anywhere in the filename (defaults to 1st of month)
+    7. Current UTC time (logged as a warning)
     """
+    # Step 1: Check for specific timestamp patterns in filename
+    dt_str, _ = _extract_datetime_from_filename_patterns(filename)
+    if dt_str:
+        return dt_str
+
+    def _norm(raw: str) -> str:
+        """Normalize common datetime string variants to improve parsing."""
+        s = raw.strip().strip('"').strip("'")
+        # Handle trailing UTC designators and compact separators.
+        s = s.replace("UTC", "").replace("Z", "").strip()
+        s = re.sub(r"\s+", " ", s)
+        return s
+
     # 1 + 2: GDAL / TIFF metadata tags (case-insensitive search)
     tag_keys = (
-        "TIFFTAG_DATETIME", "ACQUISITIONDATETIME", "DATE", 
+        "TIFFTAG_DATETIME", "ACQUISITIONDATETIME", "DATE",
         "date_acquired", "DATE_ACQUIRED", "acquisition_date",
-        "ACQUISITION_DATE", "datetime", "DATETIME", "time"
+        "ACQUISITION_DATE", "datetime", "DATETIME", "time",
+        "system:time_start", "system:time_end", "TIMESTAMP", "timestamp",
+        "START_DATETIME", "END_DATETIME", "acquisition_time",
     )
+    tag_items = {str(k): str(v) for k, v in (tags or {}).items()}
+    lower_map = {k.lower(): v for k, v in tag_items.items()}
     for key in tag_keys:
-        raw = tags.get(key, "").strip()
+        raw = tag_items.get(key) or lower_map.get(key.lower()) or ""
+        raw = _norm(raw)
         if not raw:
             continue
+        # Earth Engine often stores epoch milliseconds in system:time_start.
+        if re.fullmatch(r"\d{13}", raw):
+            try:
+                dt = datetime.fromtimestamp(int(raw) / 1000, tz=timezone.utc)
+                return dt.isoformat()
+            except Exception:
+                pass
+        # Epoch seconds
+        if re.fullmatch(r"\d{10}", raw):
+            try:
+                dt = datetime.fromtimestamp(int(raw), tz=timezone.utc)
+                return dt.isoformat()
+            except Exception:
+                pass
         for fmt in (
             "%Y:%m:%d %H:%M:%S",
             "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
             "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%dT%H:%M:%S.%fZ",
             "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M:%S.%f",
             "%Y-%m-%d",
             "%Y%m%d",
             "%d/%m/%Y",
@@ -142,6 +226,24 @@ def _extract_datetime(tags: dict, filename: str) -> str:
                 return dt.replace(tzinfo=timezone.utc).isoformat()
             except ValueError:
                 continue
+        # Handle quarter labels like 2024_Q1 / 2024-Q1 / Q1_2024
+        qmatch = (
+            re.search(r"(\d{4})[_-]?Q([1-4])", raw, flags=re.IGNORECASE)
+            or re.search(r"Q([1-4])[_-]?(\d{4})", raw, flags=re.IGNORECASE)
+        )
+        if qmatch:
+            try:
+                if raw.upper().startswith("Q"):
+                    quarter = int(qmatch.group(1))
+                    year = int(qmatch.group(2))
+                else:
+                    year = int(qmatch.group(1))
+                    quarter = int(qmatch.group(2))
+                month = ((quarter - 1) * 3) + 1
+                dt = datetime(year, month, 1, tzinfo=timezone.utc)
+                return dt.isoformat()
+            except Exception:
+                pass
 
     basename = os.path.basename(filename)
     
@@ -173,6 +275,25 @@ def _extract_datetime(tags: dict, filename: str) -> str:
             if 1970 <= year <= 2100 and 1 <= month <= 12:
                 dt = datetime(year, month, 1)
                 return dt.replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            pass
+
+    # 5b: Quarter in filename (YYYY_Qn / YYYY-Qn / Qn_YYYY)
+    qmatch = (
+        re.search(r"(\d{4})[_-]?Q([1-4])", basename, flags=re.IGNORECASE)
+        or re.search(r"Q([1-4])[_-]?(\d{4})", basename, flags=re.IGNORECASE)
+    )
+    if qmatch:
+        try:
+            if basename.upper().startswith("Q"):
+                quarter = int(qmatch.group(1))
+                year = int(qmatch.group(2))
+            else:
+                year = int(qmatch.group(1))
+                quarter = int(qmatch.group(2))
+            month = ((quarter - 1) * 3) + 1
+            dt = datetime(year, month, 1)
+            return dt.replace(tzinfo=timezone.utc).isoformat()
         except ValueError:
             pass
 
@@ -592,8 +713,13 @@ def validate_cog(s3_uri: str, s3_config: dict) -> tuple[bool, list[str]]:
     return not hard_failure, issues
 
 
-def extract_cog_metadata(s3_uri: str, s3_config: dict) -> dict:
+def extract_cog_metadata(s3_uri: str, s3_config: dict, filename: str | None = None) -> dict:
     """Extract spatial and radiometric metadata from a COG.
+
+    Args:
+        s3_uri: S3 URI of the COG (s3://bucket/key)
+        s3_config: S3 configuration dict for rasterio environment
+        filename: Original filename (optional, used to extract timestamp patterns)
 
     Returns a dict with keys:
         bbox            [west, south, east, north]  EPSG:4326
@@ -604,6 +730,7 @@ def extract_cog_metadata(s3_uri: str, s3_config: dict) -> dict:
         gsd_meters      ground sample distance in metres
         bands           list of {index, dtype, nodata}
         datetime        ISO-8601 UTC string
+        end_datetime    ISO-8601 UTC string (only if extracted from filename range)
         file_size_bytes int or None
         geometry_valid  bool - False if bbox looks invalid (covers earth or at origin)
     """
@@ -665,7 +792,12 @@ def extract_cog_metadata(s3_uri: str, s3_config: dict) -> dict:
             ]
 
             tags = src.tags()
-            item_datetime = _extract_datetime(tags, vsi)
+            # Prefer caller-provided name for datetime extraction, then S3 URI.
+            datetime_filename = filename if filename else s3_uri
+            item_datetime = _extract_datetime(tags, datetime_filename)
+
+            # Check for datetime range in filename patterns
+            _, end_datetime = _extract_datetime_from_filename_patterns(datetime_filename)
 
             # File size: attempt GDAL VSIStatL, fall back to None
             file_size_bytes: int | None = None
@@ -685,7 +817,7 @@ def extract_cog_metadata(s3_uri: str, s3_config: dict) -> dict:
                 logger.warning("rendering_config extraction failed: %s", exc)
                 rendering_config = None
 
-            return {
+            result = {
                 "bbox": [west, south, east, north],
                 "center_point": [round(center_lon, 6), round(center_lat, 6)],
                 "geometry_valid": geometry_valid,
@@ -699,6 +831,12 @@ def extract_cog_metadata(s3_uri: str, s3_config: dict) -> dict:
                 "file_size_bytes": file_size_bytes,
                 "rendering_config": rendering_config,
             }
+
+            # Add end_datetime if extracted from filename range pattern
+            if end_datetime:
+                result["end_datetime"] = end_datetime
+
+            return result
 
 
 def build_stac_item(
@@ -715,9 +853,11 @@ def build_stac_item(
     west, south, east, north = metadata["bbox"]
     center_point = metadata.get("center_point", [(west + east) / 2, (south + north) / 2])
 
+    # Check if this is a datetime range (extracted from filename patterns)
+    has_range = "end_datetime" in metadata
+
     # Build properties dict, then sanitize for JSON safety
     properties = {
-        "datetime": metadata["datetime"],
         "gsd": metadata.get("gsd_meters"),
         "proj:epsg": _epsg_code(metadata.get("native_crs")),
         "proj:shape": [metadata.get("height"), metadata.get("width")],
@@ -733,6 +873,14 @@ def build_stac_item(
         # Pre-computed rendering config (band stats, presets, data category)
         "rendering_config": metadata.get("rendering_config"),
     }
+
+    # Add datetime properties: either single datetime or range (start/end)
+    if has_range:
+        properties["datetime"] = None  # null in STAC when using range
+        properties["start_datetime"] = metadata["datetime"]
+        properties["end_datetime"] = metadata["end_datetime"]
+    else:
+        properties["datetime"] = metadata["datetime"]
     
     # Ensure all values are JSON-safe (no NaN/Inf)
     properties = _sanitize_for_json(properties)

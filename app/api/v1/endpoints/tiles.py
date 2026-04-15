@@ -267,15 +267,24 @@ async def get_multi_item_tilejson(
     """
     result = await db.execute(
         select(DatasetItem).where(
-            DatasetItem.id.in_(payload.item_ids),
+            DatasetItem.stac_item_id.in_(payload.item_ids),
             DatasetItem.organization_id == org_id,
             DatasetItem.is_active.is_(True),
         )
     )
     items = result.scalars().all()
 
-    if len(items) != len(payload.item_ids):
-        raise HTTPException(status_code=404, detail="One or more dataset items not found")
+    if not items:
+        raise HTTPException(status_code=404, detail="No matching dataset items found")
+
+    # Deduplicate by stac_item_id (same item may appear in multiple collections)
+    seen: set[str] = set()
+    unique_items = []
+    for item in items:
+        if item.stac_item_id not in seen:
+            seen.add(item.stac_item_id)
+            unique_items.append(item)
+    items = unique_items
 
     stac_item_ids = [item.stac_item_id for item in items]
     collection_ids = list({item.stac_collection_id for item in items})

@@ -2,7 +2,7 @@ import logging
 
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import worker_ready
+from celery.signals import worker_ready, beat_init
 
 from app.config import settings
 
@@ -92,3 +92,19 @@ def _reset_orphaned_running_jobs(sender, **kwargs):
                 logger.warning("worker_startup_cleanup reset %d orphaned running jobs", count)
     except Exception:
         logger.exception("worker_startup_cleanup failed — orphaned jobs not reset")
+
+
+@beat_init.connect
+def _sync_scheduled_pipelines_on_beat_start(sender, **kwargs):
+    """On Celery Beat startup, reload all active schedule-triggered pipelines from DB.
+
+    This ensures scheduled pipelines persist across Beat process restarts, even though
+    changes to in-memory beat_schedule are lost on restart. The API path still provides
+    immediate effect without restart.
+    """
+    try:
+        from app.workers.automation.scheduler import sync_scheduled_pipelines
+        count = sync_scheduled_pipelines()
+        logger.info("beat_startup: registered %d scheduled automation pipeline(s)", count)
+    except Exception:
+        logger.exception("beat_startup: failed to sync scheduled pipelines")

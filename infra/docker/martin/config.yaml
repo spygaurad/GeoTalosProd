@@ -29,15 +29,17 @@ postgres:
 
   # Tables to expose as vector tile sources.
   # Each entry maps to a tile source at /martin/<source_id>/{z}/{x}/{y}
+  #
+  # NOTE: the raw `annotations` table is intentionally NOT exposed.  Martin
+  # connects with the martin_reader role (BYPASSRLS) so it cannot evaluate
+  # the per-request RLS session variable; exposing the table directly would
+  # leak rows across organizations.  Annotations are served via the
+  # `annotation_set_mvt` function source (auto-discovered from migration 036)
+  # behind the FastAPI tile proxy at
+  # GET /api/v1/annotation-sets/{set_id}/tiles/{z}/{x}/{y}.pbf
+  # which authenticates the request and verifies org ownership of the set
+  # before forwarding to Martin.
   tables:
-    # Annotation geometries — used for rendering labelled features on the map
-    annotations:
-      schema: public
-      table: annotations
-      srid: 4326
-      geometry_column: geometry
-      geometry_type: Geometry
-
     # Dataset spatial extents — used for rendering dataset coverage on the map
     datasets:
       schema: public
@@ -53,3 +55,12 @@ postgres:
       srid: 4326
       geometry_column: geometry
       geometry_type: Geometry
+
+  # Function sources — parameterised SQL functions returning ST_AsMVT bytes.
+  functions:
+    # Per-set annotation tiles.  Filtered server-side by `set_id` query
+    # parameter; tenant isolation is enforced by the FastAPI tile proxy
+    # (see app/api/v1/endpoints/annotation_sets.py).
+    annotation_set_mvt:
+      schema: public
+      function: annotation_set_mvt

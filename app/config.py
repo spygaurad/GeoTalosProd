@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     STAC_API_URL: str = ""
     # TiTiler (titiler-pgstac) — internal Docker URL; never exposed to browsers
     TITILER_URL: str = ""
+    # Martin vector tile server — internal Docker URL; never exposed to browsers.
+    # All annotation tile requests are proxied through the FastAPI tile proxy
+    # so the request can be authenticated and tenant-scoped.
+    MARTIN_URL: str = "http://martin:3000"
     # Public-facing API base URL — used to rewrite TiTiler tile URLs in tilejson
     # responses so browsers call the tile proxy endpoint instead of titiler directly.
     # No trailing slash. Example: https://api.example.com

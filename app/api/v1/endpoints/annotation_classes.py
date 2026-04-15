@@ -12,6 +12,7 @@ from app.schemas.annotation_class import (
     AnnotationClassListResponse,
     AnnotationClassRead,
     AnnotationClassUpdate,
+    ClassStyleUpsert,
 )
 from app.services.annotation_class_service import AnnotationClassService
 
@@ -58,6 +59,41 @@ async def create_annotation_class(
         organization_id=str(org_id),
         entity="annotation_class",
         entity_id=str(cls.id),
+        session=db,
+    )
+    return cls
+
+
+@schema_router.patch(
+    "/{schema_id}/classes/{class_id}/style",
+    response_model=AnnotationClassRead,
+    summary="Upsert the style for an annotation class",
+    description=(
+        "Creates a new Style record if the class has no style, "
+        "or merges the provided definition into the existing Style."
+    ),
+)
+async def upsert_annotation_class_style(
+    schema_id: UUID,
+    class_id: UUID,
+    payload: ClassStyleUpsert,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    service = AnnotationClassService(db)
+    cls = await service.upsert_style(
+        schema_id=schema_id,
+        class_id=class_id,
+        payload=payload,
+        organization_id=org_id,
+    )
+    await log_audit_event(
+        action="annotation_classes.style_upsert",
+        actor_id=str(current_user.id),
+        organization_id=str(org_id),
+        entity="annotation_class",
+        entity_id=str(class_id),
         session=db,
     )
     return cls

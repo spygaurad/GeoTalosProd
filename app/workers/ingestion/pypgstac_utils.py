@@ -71,7 +71,12 @@ def batch_upsert_stac_items(items: list[dict], dsn: str) -> None:
     # Log datetime range for debugging timezone issues
     datetimes = []
     for item in items:
-        dt_str = item.get("properties", {}).get("datetime")
+        props = item.get("properties", {})
+        dt_str = (
+            props.get("datetime")
+            or props.get("start_datetime")
+            or props.get("end_datetime")
+        )
         if dt_str:
             datetimes.append(dt_str)
     

@@ -11,10 +11,9 @@ from datetime import datetime, UTC
 
 from app.workers.celery_app import celery_app
 from app.workers.db import WorkerSession
+from app.workers.queues import AUTOMATION
 
 logger = logging.getLogger(__name__)
-
-AUTOMATION_QUEUE = "automation"
 
 
 def _publish_step_event(org_id, event_type: str, run, step, **extra):
@@ -51,7 +50,7 @@ def _publish_run_event(org_id, event_type: str, run):
         logger.debug("Failed to publish %s event", event_type, exc_info=True)
 
 
-@celery_app.task(bind=True, queue=AUTOMATION_QUEUE, max_retries=0)
+@celery_app.task(bind=True, queue=AUTOMATION, max_retries=0)
 def execute_step(self, run_id: str, step_id: str) -> None:
     """
     Execute a single automation step.
@@ -245,7 +244,7 @@ def _check_run_completion(session, run):
         event_type = "automation.run.completed" if run.status == "completed" else "automation.run.failed"
         _publish_run_event(run.organization_id, event_type, run)
 
-@celery_app.task(queue=AUTOMATION_QUEUE)
+@celery_app.task(queue=AUTOMATION)
 def resume_after_job(job_id: str, output_data: dict | None = None) -> None:
     """Called when a long-running Job completes. Resumes the waiting automation step.
 
@@ -289,7 +288,7 @@ def resume_after_job(job_id: str, output_data: dict | None = None) -> None:
         _check_run_completion(session, run)
 
 
-@celery_app.task(queue=AUTOMATION_QUEUE)
+@celery_app.task(queue=AUTOMATION)
 def trigger_scheduled_pipeline(pipeline_id: str) -> None:
     """Called by Celery Beat for scheduled pipelines."""
     with WorkerSession() as session:

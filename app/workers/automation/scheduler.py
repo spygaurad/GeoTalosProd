@@ -43,3 +43,44 @@ def unregister_pipeline_schedule(pipeline_id: str):
     celery_app.conf.beat_schedule.pop(key, None)
 
 
+def sync_scheduled_pipelines():
+    """
+    Query all active schedule-triggered pipelines from DB and register them
+    in Celery Beat's in-memory schedule. Called on worker/beat startup via signal.
+
+    Returns the number of pipelines registered.
+    """
+    from app.workers.db import WorkerSession
+    from sqlalchemy import select, and_
+    from app.models.automation import AutomationPipeline
+
+    registered = 0
+    try:
+        with WorkerSession() as session:
+            pipelines = session.execute(
+                select(AutomationPipeline).where(
+                    and_(
+                        AutomationPipeline.trigger_type == "schedule",
+                        AutomationPipeline.status == "active",
+                        AutomationPipeline.deleted_at.is_(None),
+                    )
+                )
+            ).scalars().all()
+
+            for pipeline in pipelines:
+                trigger_config = pipeline.trigger_config or {}
+                cron_expr = trigger_config.get("cron_expression")
+                tz = trigger_config.get("timezone", "UTC")
+                if cron_expr:
+                    try:
+                        register_pipeline_schedule(str(pipeline.id), cron_expr, tz)
+                        registered += 1
+                    except ValueError:
+                        # Invalid cron expression — skip silently
+                        pass
+    except Exception:
+        # If DB access fails, silently skip — Beat will still work with empty schedule
+        pass
+
+    return registered
+

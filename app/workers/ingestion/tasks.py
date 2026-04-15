@@ -154,15 +154,26 @@ def _compute_aggregated_metadata(collection: str) -> dict | None:
             min((content->'properties'->>'gsd')::float) AS gsd_min,
             max((content->'properties'->>'gsd')::float) AS gsd_max,
             count(*) AS file_count,
-            sum((content->'properties'->>'file_size_bytes')::bigint) AS total_size,
-            array_agg(DISTINCT content->'properties'->>'native_crs') AS native_crs,
-            ST_AsText(ST_Envelope(ST_Collect(geometry))) AS combined_wkt,
-            min(datetime) AS start_date,
-            max(datetime) AS end_date,
-            (SELECT content->'properties'->'rendering_config'
-             FROM pgstac.items
-             WHERE collection = :cid
-             LIMIT 1) AS sample_rendering_config
+             sum((content->'properties'->>'file_size_bytes')::bigint) AS total_size,
+             array_agg(DISTINCT content->'properties'->>'native_crs') AS native_crs,
+             ST_AsText(ST_Envelope(ST_Collect(geometry))) AS combined_wkt,
+             min(
+                 coalesce(
+                     datetime,
+                     (content->'properties'->>'start_datetime')::timestamptz
+                 )
+             ) AS start_date,
+             max(
+                 coalesce(
+                     (content->'properties'->>'end_datetime')::timestamptz,
+                     datetime,
+                     (content->'properties'->>'start_datetime')::timestamptz
+                 )
+             ) AS end_date,
+             (SELECT content->'properties'->'rendering_config'
+              FROM pgstac.items
+              WHERE collection = :cid
+              LIMIT 1) AS sample_rendering_config
         FROM pgstac.items
         WHERE collection = :cid
     """)
@@ -229,7 +240,7 @@ def _prepare_single_cog(
     if issues:
         logger.warning("cog_warnings uri=%s warnings=%s", s3_uri, issues)
 
-    metadata = extract_cog_metadata(s3_uri, s3_config)
+    metadata = extract_cog_metadata(s3_uri, s3_config, filename=filename)
     metadata["filename"] = filename
     item_id = _deterministic_item_id(s3_uri)
 
@@ -261,6 +272,31 @@ def _ingest_single_cog(
     return success, issues, item_id, item
 
 
+def _stac_item_datetime(properties: dict | None) -> datetime | None:
+    """Resolve DatasetItem.item_datetime from STAC properties.
+
+    For interval items, STAC sets ``datetime`` to null and uses
+    ``start_datetime``/``end_datetime``. Use start_datetime as the canonical
+    cached item timestamp.
+    """
+    props = properties or {}
+    dt_str = props.get("datetime") or props.get("start_datetime") or props.get("end_datetime")
+    if not dt_str:
+        return None
+
+    from dateutil import parser as dtparser  # noqa: PLC0415
+
+    try:
+        parsed = dtparser.isoparse(dt_str)
+    except (TypeError, ValueError) as exc:
+        logger.warning("invalid_stac_datetime value=%s error=%s", dt_str, exc)
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def _upsert_dataset_item(
     session,
     *,
@@ -285,17 +321,8 @@ def _upsert_dataset_item(
 
     # Extract geometry (GeoJSON dict) and datetime from the STAC item
     geometry = stac_item.get("geometry")
-    dt_str = (stac_item.get("properties") or {}).get("datetime")
-    item_datetime = None
-    if dt_str:
-        from datetime import timezone  # noqa: PLC0415
-        from dateutil import parser as dtparser  # noqa: PLC0415
-        try:
-            item_datetime = dtparser.parse(dt_str).replace(tzinfo=timezone.utc)
-        except Exception:
-            pass
-
     properties_cache = stac_item.get("properties")
+    item_datetime = _stac_item_datetime(properties_cache)
 
     if existing is None:
         row = DatasetItem(
@@ -664,6 +691,19 @@ def ingest_dataset(self, job_id: str, dataset_id: str, s3_key: str, filename: st
             job.finished_at = _now()
             session.commit()
             _publish_job_event(job)
+
+            # --- Dispatch automation event for dataset.ingested trigger ---
+            try:
+                from app.automation.event_dispatcher import dispatch_event_sync
+                for dataset in created_datasets:
+                    dispatch_event_sync(
+                        session,
+                        str(job.organization_id),
+                        "dataset.ingested",
+                        {"dataset_id": str(dataset.id)},
+                    )
+            except Exception:
+                logger.warning("dispatch_event_sync failed for datasets", exc_info=True)
 
             # --- Cleanup: delete the original ZIP after successful ingestion ---
             if is_zip:

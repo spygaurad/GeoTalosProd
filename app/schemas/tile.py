@@ -26,9 +26,13 @@ class MultiDatasetTileRequest(BaseModel):
 
 
 class MultiItemTileRequest(BaseModel):
-    """Request body for registering a mosaic of specific dataset items."""
+    """Request body for registering a mosaic of specific dataset items.
 
-    item_ids: list[UUID] = Field(..., min_length=1)
+    Accepts STAC item ID strings (e.g. "sentinel2_20240815_...").
+    These are matched against ``DatasetItem.stac_item_id``.
+    """
+
+    item_ids: list[str] = Field(..., min_length=1, description="STAC item ID strings.")
     assets: str | None = Field(
         default=None,
         description="Comma-separated asset names.",

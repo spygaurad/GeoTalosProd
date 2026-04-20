@@ -1,7 +1,7 @@
 """create automation tables
 
-Revision ID: 033_a1b2c3d4
-Revises: 032_add_tile_source_to_map_layers
+Revision ID: 09534c356d8e
+Revises: 7e8f9a0b1c2d
 Create Date: 2026-03-21
 """
 from alembic import op
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 revision = "09534c356d8e"
-down_revision = "7e8f9a0b1c2d"  # 032_add_tile_source_to_map_layers
+down_revision = "7e8f9a0b1c2d"
 branch_labels = None
 depends_on = None
 
@@ -104,7 +104,6 @@ def upgrade() -> None:
     for table in ("automation_pipelines", "automation_runs", "automation_run_steps"):
         op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
 
-    # All three tables: direct org-scoped RLS
     for table in ("automation_pipelines", "automation_runs", "automation_run_steps"):
         op.execute(f"""
             CREATE POLICY {table}_org_isolation ON {table}

@@ -1,7 +1,7 @@
 """Add default_annotation_schema_id to projects.
 
 Revision ID: 3a4b5c6d7e8f
-Revises: 9165194191ce
+Revises: 91a2b3c4
 Create Date: 2026-03-21
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 
 revision = "3a4b5c6d7e8f"
-down_revision = "9165194191ce"
+down_revision = "91a2b3c4"
 branch_labels = None
 depends_on = None
 

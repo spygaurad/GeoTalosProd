@@ -6,7 +6,9 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.exceptions import bad_request, conflict, not_found
+from app.models.annotation_set import AnnotationSet
 from app.models.map import Map
 from app.models.map_layer import MapLayer
 from app.models.project import Project
@@ -74,6 +76,12 @@ class MapLayerService:
         await self._get_map_for_org(map_id, organization_id)
         data = payload.model_dump()
         data["map_id"] = map_id
+
+        if payload.source_type == "annotation_set" and payload.annotation_set_id is not None:
+            data["source_config"] = await self._build_annotation_set_source_config(
+                payload.annotation_set_id, organization_id, data.get("source_config")
+            )
+
         layer = MapLayer(**data)
         self.db.add(layer)
         try:
@@ -81,10 +89,51 @@ class MapLayerService:
         except IntegrityError as exc:
             await self.db.rollback()
             logger.warning("create_layer_conflict map_id=%s error=%s", map_id, exc)
-            raise conflict("Layer creation violates a constraint (check dataset_id FK)") from exc
+            raise conflict("Layer creation violates a constraint (check annotation_set_id / dataset_id FK)") from exc
         await self.db.refresh(layer)
         logger.info("create_layer_success layer_id=%s map_id=%s", layer.id, map_id)
         return layer
+
+    async def _build_annotation_set_source_config(
+        self, annotation_set_id: UUID, organization_id: UUID, existing_config: dict | None
+    ) -> dict:
+        """Return source_config for an annotation_set layer.
+
+        For raster annotation sets (those with raster_config populated):
+          - Adds tile_url_template pointing to the server-side colormap tile endpoint.
+          - Copies colormap so the frontend can render a legend without an extra request.
+
+        For vector annotation sets:
+          - Adds geojson_url pointing to the /features endpoint.
+        """
+        result = await self.db.execute(
+            select(AnnotationSet).where(
+                AnnotationSet.id == annotation_set_id,
+                AnnotationSet.organization_id == organization_id,
+                AnnotationSet.deleted_at.is_(None),
+            )
+        )
+        ann_set = result.scalar_one_or_none()
+        if ann_set is None:
+            raise not_found("AnnotationSet")
+
+        config: dict = dict(existing_config or {})
+        base_url = settings.PUBLIC_API_URL.rstrip("/")
+
+        if ann_set.raster_config:
+            # Raster mask: tile URL uses the server-side colormap endpoint (no auth header required)
+            config["tile_url_template"] = (
+                f"{base_url}/api/v1/tiles/raster-masks/{annotation_set_id}/{{z}}/{{x}}/{{y}}.png"
+            )
+            config["colormap"] = ann_set.raster_config.get("colormap", {})
+            config["band_index"] = ann_set.raster_config.get("band_index", 1)
+            config["layer_kind"] = "raster_mask"
+        else:
+            # Vector annotation set: frontend fetches GeoJSON from the features endpoint
+            config["geojson_url"] = f"{base_url}/api/v1/annotation-sets/{annotation_set_id}/features"
+            config["layer_kind"] = "vector"
+
+        return config
 
     async def update_layer(
         self,

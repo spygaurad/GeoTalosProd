@@ -57,5 +57,6 @@ class Job(Base):
     )
     annotation_sets: Mapped[list["AnnotationSet"]] = relationship(
         "AnnotationSet",
-        back_populates="creator_job",
+        back_populates="job",
+        foreign_keys="AnnotationSet.job_id",
     )

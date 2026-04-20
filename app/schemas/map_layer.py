@@ -60,7 +60,7 @@ class MapLayerCreate(ORMModel):
         elif st == "annotation_set":
             if self.annotation_set_id is None:
                 raise ValueError("annotation_set_id is required when source_type is 'annotation_set'")
-            if self.dataset_id or self.stac_item_id or self.tile_service_url:
+            if self.dataset_id or self.stac_item_id or self.tile_service_url or self.tile_source_id:
                 raise ValueError("Only annotation_set_id may be set when source_type is 'annotation_set'")
 
         # zoom range
@@ -111,8 +111,8 @@ class MapLayerRead(ORMModel):
     dataset_id: UUID | None
     stac_item_id: str | None
     tile_service_url: str | None
-    annotation_set_id: UUID | None
     tile_source_id: UUID | None
+    annotation_set_id: UUID | None
     source_config: dict | None
     style_id: UUID | None
     style_override: dict | None

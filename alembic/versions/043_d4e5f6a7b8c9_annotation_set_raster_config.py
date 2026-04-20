@@ -7,7 +7,6 @@ requiring a MapLayer record.
 Revision ID: d4e5f6a7b8c9
 Revises: c3d4e5f6a7b8
 Create Date: 2026-04-15
-
 """
 from alembic import op
 import sqlalchemy as sa

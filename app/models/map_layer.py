@@ -14,11 +14,12 @@ class MapLayer(Base):
         Index("idx_map_layers_map", "map_id"),
         Index("idx_map_layers_dataset", "dataset_id"),
         Index("idx_map_layers_style", "style_id"),
+        Index("idx_map_layers_annotation_set", "annotation_set_id"),
         CheckConstraint(
-            "(source_type = 'dataset' AND dataset_id IS NOT NULL AND stac_item_id IS NULL AND tile_service_url IS NULL AND annotation_set_id IS NULL) OR "
-            "(source_type = 'stac_item' AND stac_item_id IS NOT NULL AND dataset_id IS NULL AND tile_service_url IS NULL AND annotation_set_id IS NULL) OR "
-            "(source_type = 'tile_service' AND tile_service_url IS NOT NULL AND dataset_id IS NULL AND stac_item_id IS NULL AND annotation_set_id IS NULL) OR "
-            "(source_type = 'annotation_set' AND annotation_set_id IS NOT NULL AND dataset_id IS NULL AND stac_item_id IS NULL AND tile_service_url IS NULL)",
+            "(source_type = 'dataset' AND dataset_id IS NOT NULL AND stac_item_id IS NULL AND tile_service_url IS NULL AND tile_source_id IS NULL AND annotation_set_id IS NULL) OR "
+            "(source_type = 'stac_item' AND stac_item_id IS NOT NULL AND dataset_id IS NULL AND tile_service_url IS NULL AND tile_source_id IS NULL AND annotation_set_id IS NULL) OR "
+            "(source_type = 'tile_service' AND (tile_service_url IS NOT NULL OR tile_source_id IS NOT NULL) AND dataset_id IS NULL AND stac_item_id IS NULL AND annotation_set_id IS NULL) OR "
+            "(source_type = 'annotation_set' AND annotation_set_id IS NOT NULL AND dataset_id IS NULL AND stac_item_id IS NULL AND tile_service_url IS NULL AND tile_source_id IS NULL)",
             name="ck_map_layers_source",
         ),
     )
@@ -36,11 +37,11 @@ class MapLayer(Base):
     stac_item_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tile_service_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     source_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    annotation_set_id: Mapped[uuid.UUID | None] = mapped_column( 
-        UUID(as_uuid=True), ForeignKey("annotation_sets.id", ondelete="CASCADE"), nullable=True
-    )
     tile_source_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tile_sources.id", ondelete="SET NULL"), nullable=True
+    )
+    annotation_set_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("annotation_sets.id", ondelete="CASCADE"), nullable=True
     )
     style_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("styles.id", ondelete="SET NULL"), nullable=True
@@ -62,4 +63,5 @@ class MapLayer(Base):
     map: Mapped["Map"] = relationship("Map", back_populates="layers")
     dataset: Mapped["Dataset | None"] = relationship("Dataset", back_populates="map_layers")
     tile_source: Mapped["TileSource | None"] = relationship("TileSource")
+    annotation_set: Mapped["AnnotationSet | None"] = relationship("AnnotationSet")
     style: Mapped["Style | None"] = relationship("Style")

@@ -49,7 +49,9 @@ def run_change_detection_job(self, job_id: str) -> None:
             # Create output annotation set for changed areas
             output_set = AnnotationSet(
                 name=f"Change Detection Results ({job_id[:8]})",
-                created_by_job_id=job.id,
+                job_id=job.id,
+                organization_id=job.organization_id,
+                source_type="analysis",
             )
             session.add(output_set)
             session.flush()

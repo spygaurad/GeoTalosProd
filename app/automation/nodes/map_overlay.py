@@ -23,27 +23,25 @@ from app.automation.registry import node, HandleDef
     color="#06B6D4",
 )
 def execute_overlay_on_map(session, config, input_data, **kwargs):
-    """Create a MapLayer row pointing at the annotation set."""
-    from app.models.map_layer import MapLayer
+    """Mount the annotation set on a map via the map_annotation_sets join table."""
+    from app.models.map_annotation_set import MapAnnotationSet
 
     aset = input_data.get("annotation_set", {})
     aset_id = aset.get("id")
     if not aset_id:
         return {"annotation_set": aset}
 
-    layer = MapLayer(
+    mount = MapAnnotationSet(
         map_id=uuid.UUID(config["map_id"]),
-        name=config.get("layer_name") or aset.get("name") or "Automation Result",
-        layer_type="vector",
-        source_type="annotation_set",
         annotation_set_id=uuid.UUID(aset_id),
         visible=True,
         opacity=1.0,
+        z_index=0,
     )
-    session.add(layer)
+    session.add(mount)
     session.flush()
 
-    return {"annotation_set": {**aset, "map_layer_id": str(layer.id)}}
+    return {"annotation_set": {**aset, "map_id": config["map_id"]}}
 
 
 @node(
@@ -106,8 +104,8 @@ def execute_overlay_dataset_on_map(session, config, input_data, **kwargs):
     color="#06B6D4",
 )
 def execute_style_assignment(session, config, input_data, **kwargs):
-    """Apply a style to the annotation set's map layer if one exists."""
-    from app.models.map_layer import MapLayer
+    """Apply a style to all map mounts of the annotation set."""
+    from app.models.map_annotation_set import MapAnnotationSet
 
     aset = input_data.get("annotation_set", {})
     aset_id = aset.get("id")
@@ -115,18 +113,17 @@ def execute_style_assignment(session, config, input_data, **kwargs):
     if not aset_id or not style_id:
         return {"annotation_set": aset}
 
-    # Find map layers that reference this annotation set and apply style
     from sqlalchemy import select
-    stmt = select(MapLayer).where(
-        MapLayer.annotation_set_id == uuid.UUID(aset_id),
+    stmt = select(MapAnnotationSet).where(
+        MapAnnotationSet.annotation_set_id == uuid.UUID(aset_id),
     )
-    layers = session.execute(stmt).scalars().all()
-    for layer in layers:
-        layer.style_id = uuid.UUID(style_id)
+    mounts = session.execute(stmt).scalars().all()
+    for mount in mounts:
+        mount.style_id = uuid.UUID(style_id)
         if config.get("color_by"):
-            layer.style_override = {"color_by": config["color_by"]}
+            mount.style_override = {"color_by": config["color_by"]}
 
-    if layers:
+    if mounts:
         session.flush()
 
     return {"annotation_set": {**aset, "style_id": style_id}}

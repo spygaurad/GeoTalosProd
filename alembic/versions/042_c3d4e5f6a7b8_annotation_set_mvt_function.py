@@ -7,11 +7,14 @@ parameterised function source.  The FastAPI tile proxy is responsible for
 authenticating the request and verifying that the caller's org owns the
 ``set_id`` before forwarding to Martin.
 
-Also extends ``ck_jobs_type`` to allow the new ``import_annotations`` job
-type used by the GeoJSON import worker.
+Annotation sets are mounted on maps via the map_annotation_sets join table
+(migration 030). The MVT function serves them as vector tiles regardless of
+how they are mounted — the proxy passes the annotation_set UUID directly.
+
+Also extends ``ck_jobs_type`` to allow all current JobType values.
 
 Revision ID: c3d4e5f6a7b8
-Revises: b2c3d4e5f6a7
+Revises: a1b2c3d4e5f6
 Create Date: 2026-04-06 00:00:00.000000
 """
 
@@ -20,7 +23,7 @@ from alembic import op
 from app.core.enums import JobType
 
 revision = "c3d4e5f6a7b8"
-down_revision = "b2c3d4e5f6a7"
+down_revision = "a1b2c3d4e5f6"
 branch_labels = None
 depends_on = None
 
@@ -29,7 +32,7 @@ _TYPE_CHECK = "type IN ({})".format(", ".join(f"'{t}'" for t in JobType))
 
 
 def upgrade() -> None:
-    # ── Extend ck_jobs_type to include the new import_annotations type ──
+    # ── Extend ck_jobs_type to include all current JobType values ──
     op.drop_constraint("ck_jobs_type", "jobs", type_="check")
     op.create_check_constraint("ck_jobs_type", "jobs", _TYPE_CHECK)
 
@@ -91,5 +94,4 @@ def downgrade() -> None:
         "DROP FUNCTION IF EXISTS public.annotation_set_mvt(integer, integer, integer, json)"
     )
     op.drop_constraint("ck_jobs_type", "jobs", type_="check")
-    # Recreate the original CHECK from migration 022 (only INGEST)
-    op.create_check_constraint("ck_jobs_type", "jobs", "type IN ('ingest')")
+    op.create_check_constraint("ck_jobs_type", "jobs", "type IN ('ingest', 'inference')")

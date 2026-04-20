@@ -30,7 +30,6 @@ def upgrade():
     op.create_index("idx_feature_layers_org", "feature_layers", ["organization_id"])
     op.execute("CREATE INDEX idx_feature_layers_geom ON feature_layers USING GIST (geometry)")
 
-    # RLS
     op.execute("ALTER TABLE feature_layers ENABLE ROW LEVEL SECURITY")
     op.execute("""
         CREATE POLICY feature_layers_org_isolation ON feature_layers

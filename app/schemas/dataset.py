@@ -4,9 +4,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.enums import DatasetType
 from app.core.geometry import serialize_geometry
 from app.core.ranges import tstzrange_to_dict
 from app.schemas.common import ORMModel, PaginatedResponse
+
+_ALLOWED_DATASET_TYPES = {dt.value for dt in DatasetType}
 
 
 class _DatasetBase(ORMModel):
@@ -34,11 +37,29 @@ class DatasetCreate(_DatasetBase):
         serialization_alias="metadata",
     )
 
+    @field_validator("dataset_type")
+    @classmethod
+    def _validate_dataset_type(cls, v: str) -> str:
+        if v not in _ALLOWED_DATASET_TYPES:
+            raise ValueError(
+                f"dataset_type must be one of {sorted(_ALLOWED_DATASET_TYPES)}"
+            )
+        return v
+
 
 class DatasetUpdate(_DatasetBase):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     dataset_type: str | None = Field(default=None, min_length=1, max_length=50)
+
+    @field_validator("dataset_type")
+    @classmethod
+    def _validate_dataset_type(cls, v: str | None) -> str | None:
+        if v is not None and v not in _ALLOWED_DATASET_TYPES:
+            raise ValueError(
+                f"dataset_type must be one of {sorted(_ALLOWED_DATASET_TYPES)}"
+            )
+        return v
     stac_collection_id: str | None = None
     geometry: dict | None = None
     temporal_extent: dict | None = None

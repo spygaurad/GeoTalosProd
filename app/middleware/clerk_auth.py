@@ -42,6 +42,15 @@ _PARTS_UPLOAD_RE = re.compile(
     r"^/api/v1/datasets/[^/]+/uploads/[^/]+/parts/\d+$"
 )
 
+# Raster-mask tile proxy: GET /api/v1/tiles/raster-masks/{annotation_set_id}/{z}/{x}/{y}.{fmt}
+# Map libraries load tile URLs as image <src> and cannot attach custom headers.
+# The annotation_set_id (a random UUID) acts as a capability token — equivalent to
+# how titiler serves dataset tiles without requiring auth on each tile request.
+# RLS-based org isolation still applies inside the endpoint via the DB session.
+_RASTER_MASK_TILE_RE = re.compile(
+    r"^/api/v1/tiles/raster-masks/[0-9a-f-]{36}/\d+/\d+/\d+\.\w+$"
+)
+
 # Dev claim set injected when no Authorization header is present in development.
 _DEV_CLAIMS: dict[str, Any] = {
     "sub": "user_dev",
@@ -68,6 +77,11 @@ class ClerkAuthMiddleware(BaseHTTPMiddleware):
 
         # Part-upload proxy is exempt — the endpoint verifies the upload_id itself.
         if request.method == "PUT" and _PARTS_UPLOAD_RE.match(request.url.path):
+            return await call_next(request)
+
+        # Raster-mask tile proxy is exempt — map libraries cannot attach auth headers
+        # to image <src> tile requests.  The annotation_set UUID is the capability token.
+        if request.method == "GET" and _RASTER_MASK_TILE_RE.match(request.url.path):
             return await call_next(request)
 
         auth_header = request.headers.get("Authorization", "")

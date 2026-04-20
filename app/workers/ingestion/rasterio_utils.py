@@ -713,6 +713,91 @@ def validate_cog(s3_uri: str, s3_config: dict) -> tuple[bool, list[str]]:
     return not hard_failure, issues
 
 
+def extract_unique_values(
+    s3_uri: str,
+    s3_config: dict,
+    *,
+    band_index: int = 1,
+    max_pixels: int = 512 * 512,
+    max_values: int = 256,
+) -> dict:
+    """Return unique pixel values for a raster band from a decimated read.
+
+    This is intended for segmentation masks where users need to map class
+    IDs (pixel values) to annotation classes without reading the full raster.
+
+    The read is bounded by *max_pixels* (decimated resolution) and
+    *max_values* (result cap).  Raises ``ValueError`` for invalid parameters
+    or out-of-range band index.  Raises ``MemoryError`` if the decimated read
+    still exceeds available memory — callers should surface this as a 507.
+    """
+    import numpy as np
+    import rasterio
+    from rasterio.env import Env
+
+    if band_index < 1:
+        raise ValueError("band_index must be >= 1")
+
+    vsi = _vsi_path(s3_uri)
+
+    with Env(**s3_config):
+        try:
+            src_file = rasterio.open(vsi)
+        except Exception as exc:
+            raise ValueError(f"Cannot open raster file: {exc}") from exc
+
+        with src_file as src:
+            if band_index > src.count:
+                raise ValueError(
+                    f"band_index {band_index} is out of range (raster has {src.count} bands)"
+                )
+
+            width = max(1, src.width)
+            height = max(1, src.height)
+            total_pixels = width * height
+
+            if total_pixels <= max_pixels:
+                out_width, out_height = width, height
+            else:
+                scale = (max_pixels / float(total_pixels)) ** 0.5
+                out_width = max(1, int(width * scale))
+                out_height = max(1, int(height * scale))
+
+            try:
+                data = src.read(band_index, out_shape=(out_height, out_width))
+            except MemoryError:
+                raise MemoryError(
+                    f"Raster is too large to preview at {out_width}×{out_height} "
+                    f"pixels — reduce max_pixels or use a lower-resolution overview"
+                )
+
+            arr = np.asarray(data).reshape(-1)
+
+            # Exclude nodata and NaN values from candidate class IDs.
+            nodata = src.nodata
+            if nodata is not None:
+                arr = arr[arr != nodata]
+            if np.issubdtype(arr.dtype, np.floating):
+                arr = arr[~np.isnan(arr)]
+
+            try:
+                uniques = np.unique(arr)
+            except MemoryError:
+                raise MemoryError("Not enough memory to compute unique pixel values")
+
+            uniques_sorted = np.sort(uniques)
+            total_unique = int(uniques_sorted.size)
+            truncated = total_unique > max_values
+            if truncated:
+                uniques_sorted = uniques_sorted[:max_values]
+
+            return {
+                "values": [float(v) for v in uniques_sorted.tolist()],
+                "total_unique": total_unique,
+                "truncated": truncated,
+            }
+
+
 def extract_cog_metadata(s3_uri: str, s3_config: dict, filename: str | None = None) -> dict:
     """Extract spatial and radiometric metadata from a COG.
 

@@ -38,4 +38,41 @@ class AnnotationSetRead(ORMModel):
     deleted_at: datetime | None
 
 
+class RasterMaskConfigUpdate(ORMModel):
+    dataset_item_id: str = Field(
+        min_length=1,
+        max_length=255,
+        description="Dataset item UUID or STAC item ID",
+    )
+    map_layer_id: UUID | None = None
+    band_index: int = Field(default=1, ge=1)
+    nodata_value: float | None = 0
+    value_class_map: dict[str, UUID] = Field(
+        default_factory=dict,
+        description="Mapping of raster pixel value -> annotation class UUID",
+    )
+
+
+class RasterMaskConfigRead(ORMModel):
+    annotation_set_id: UUID
+    map_layer_id: UUID | None
+    dataset_item_id: UUID
+    dataset_id: UUID
+    stac_collection_id: str
+    stac_item_id: str
+    band_index: int
+    nodata_value: float | None
+    value_class_map: dict[str, UUID]
+    colormap: dict[str, list[int]]
+    tile_url_template: str
+
+
+class RasterMaskValuesPreviewRead(ORMModel):
+    dataset_item_id: UUID
+    band_index: int
+    values: list[float]
+    total_unique: int
+    truncated: bool
+
+
 AnnotationSetListResponse = PaginatedResponse[AnnotationSetRead]

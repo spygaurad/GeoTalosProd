@@ -46,3 +46,8 @@ class MapLayerType(StrEnum):
     RASTER = "raster"
     VECTOR = "vector"
     ANNOTATION = "annotation"
+
+
+class DatasetType(StrEnum):
+    IMAGERY = "imagery"
+    SEGMENTATION_MASK = "segmentation_mask"

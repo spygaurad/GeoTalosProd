@@ -7,8 +7,9 @@ browser never contacts titiler directly.
 
 Proxy tiers:
   /tiles/collections/{cid}/{z}/{x}/{y}.{fmt}             — whole collection
-  /tiles/collections/{cid}/items/{iid}/{z}/{x}/{y}.{fmt}  — single item
+  /tiles/collections/{cid}/items/{iid}/{z}/{x}/{y}.{fmt}  — single item (org-verified)
   /tiles/mosaic/{searchid}/{z}/{x}/{y}.{fmt}               — multi-collection / multi-item search
+  /tiles/raster-masks/{set_id}/{z}/{x}/{y}.{fmt}           — segmentation mask with server-side colormap
 
 Query parameters are passed through verbatim so callers can still use all
 titiler rendering options (``assets``, ``colormap``, ``rescale``, etc.).
@@ -16,8 +17,10 @@ titiler rendering options (``assets``, ``colormap``, ``rescale``, etc.).
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -143,13 +146,102 @@ async def proxy_item_tile(
     y: int,
     fmt: str,
     request: Request,
-    _org_id: Any = Depends(require_org_role("org:viewer")),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
     _current_user: User = Depends(get_current_user),
-    _db: Any = Depends(get_session),
+    db: AsyncSession = Depends(get_session),
 ) -> Response:
-    """Stream a single-item tile from titiler."""
+    """Stream a single-item tile from titiler.
+
+    Verifies that the calling org owns the dataset item before proxying to
+    titiler — prevents cross-org leakage by guessing STAC item IDs.
+    """
+    result = await db.execute(
+        select(DatasetItem).where(
+            DatasetItem.stac_item_id == item_id,
+            DatasetItem.stac_collection_id == collection_id,
+            DatasetItem.organization_id == org_id,
+            DatasetItem.is_active.is_(True),
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Tile not found")
+
     titiler_path = f"/collections/{collection_id}/items/{item_id}/tiles/WebMercatorQuad/{z}/{x}/{y}@1x.{fmt}"
     return await _proxy_tile(titiler_path, str(request.query_params))
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: Mosaic tiles (search-based — multi-collection / multi-item)
+# ---------------------------------------------------------------------------
+
+@router.get("/raster-masks/{annotation_set_id}/{z}/{x}/{y}.{fmt}")
+async def proxy_raster_mask_tile(
+    annotation_set_id: UUID,
+    z: int,
+    x: int,
+    y: int,
+    fmt: str,
+    request: Request,
+) -> Response:
+    """Stream a colored segmentation-mask tile with server-side colormap applied.
+
+    This endpoint is exempt from ClerkAuth (see clerk_auth.py) because map
+    libraries load tile URLs as image <src> and cannot attach Authorization
+    headers.  The annotation_set UUID is the capability token.
+
+    Raster config is fetched via a SECURITY DEFINER function that bypasses RLS
+    for this single read-only, non-sensitive field (rendering metadata only —
+    no org/user/geometry data is exposed).
+    """
+    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
+
+    async with AsyncSessionLocal() as session:
+        row = await session.execute(
+            sa_text("SELECT get_raster_config_public(:id)"),
+            {"id": str(annotation_set_id)},
+        )
+        raster_cfg = row.scalar_one_or_none()
+
+    if raster_cfg is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Raster mask not found or not accessible",
+        )
+
+    if not raster_cfg:
+        raise HTTPException(
+            status_code=400,
+            detail="Annotation set has no raster mask config; call PATCH /annotation-sets/{id}/raster/config first",
+        )
+
+    colormap = raster_cfg.get("colormap")
+    if not colormap:
+        raise HTTPException(
+            status_code=400,
+            detail="Raster mask config has no persisted colormap; re-save the raster config to generate one",
+        )
+
+    stac_collection_id = raster_cfg["stac_collection_id"]
+    stac_item_id = raster_cfg["stac_item_id"]
+    band_index = raster_cfg.get("band_index", 1)
+
+    titiler_path = (
+        f"/collections/{stac_collection_id}/items/{stac_item_id}"
+        f"/tiles/WebMercatorQuad/{z}/{x}/{y}@1x.{fmt}"
+    )
+
+    # Build query string with colormap applied server-side.
+    # URL-encode the colormap JSON so special characters are safe in the URL.
+    colormap_encoded = quote(json.dumps(colormap), safe="")
+    qs = f"assets=data&asset_bidx=data|{band_index}&colormap={colormap_encoded}"
+
+    # Pass through any extra query params from the request (e.g. rescale, opacity).
+    req_qs = str(request.query_params)
+    if req_qs:
+        qs = f"{qs}&{req_qs}"
+
+    return await _proxy_tile(titiler_path, qs)
 
 
 # ---------------------------------------------------------------------------

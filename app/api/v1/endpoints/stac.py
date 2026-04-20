@@ -13,7 +13,7 @@ the underlying pgSTAC database is shared.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -61,6 +61,18 @@ def _raise_if_stac_error(resp: httpx.Response, context: str) -> None:
         raise HTTPException(status_code=502, detail="STAC service returned an error")
 
 
+def _handle_stac_request_error(exc: httpx.RequestError, context: str) -> NoReturn:
+    """Convert an httpx network/connection error into a proper HTTPException.
+
+    Unhandled httpx.RequestError escapes ExceptionMiddleware and reaches
+    ServerErrorMiddleware, which generates a bare 500 without CORS headers.
+    Converting to HTTPException ensures ExceptionMiddleware catches it and the
+    response travels through the full middleware chain (including CORSMiddleware).
+    """
+    logger.error("stac_proxy_connection_error context=%s error=%s", context, exc)
+    raise HTTPException(status_code=503, detail="STAC service is unavailable")
+
+
 # ---------------------------------------------------------------------------
 # GET /stac/collections
 # ---------------------------------------------------------------------------
@@ -79,7 +91,10 @@ async def list_stac_collections(
         return {"collections": [], "numberMatched": 0, "numberReturned": 0}
 
     client = _get_stac_client()
-    resp = await client.get("/collections", params={"limit": 200})
+    try:
+        resp = await client.get("/collections", params={"limit": 200})
+    except httpx.RequestError as exc:
+        _handle_stac_request_error(exc, "list_collections")
     _raise_if_stac_error(resp, "list_collections")
 
     body = resp.json()
@@ -108,7 +123,10 @@ async def get_stac_collection(
         raise HTTPException(status_code=404, detail="Collection not found")
 
     client = _get_stac_client()
-    resp = await client.get(f"/collections/{collection_id}")
+    try:
+        resp = await client.get(f"/collections/{collection_id}")
+    except httpx.RequestError as exc:
+        _handle_stac_request_error(exc, "get_collection")
     _raise_if_stac_error(resp, "get_collection")
     if resp.status_code == 404:
         raise HTTPException(status_code=404, detail="Collection not found")
@@ -143,7 +161,10 @@ async def list_stac_collection_items(
         params["datetime"] = datetime
 
     client = _get_stac_client()
-    resp = await client.get(f"/collections/{collection_id}/items", params=params)
+    try:
+        resp = await client.get(f"/collections/{collection_id}/items", params=params)
+    except httpx.RequestError as exc:
+        _handle_stac_request_error(exc, "list_items")
     _raise_if_stac_error(resp, "list_items")
     if resp.status_code == 404:
         raise HTTPException(status_code=404, detail="Collection not found")
@@ -187,7 +208,10 @@ async def search_stac(
     body["collections"] = list(effective)
 
     client = _get_stac_client()
-    resp = await client.post("/search", json=body)
+    try:
+        resp = await client.post("/search", json=body)
+    except httpx.RequestError as exc:
+        _handle_stac_request_error(exc, "search")
     _raise_if_stac_error(resp, "search")
 
     return resp.json()

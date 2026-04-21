@@ -7,7 +7,9 @@ from app.schemas.common import ORMModel, PaginatedResponse
 
 
 class AnnotationSetCreate(ORMModel):
-    schema_id: UUID | None = None
+    # Required since migration 047 — every set carries class semantics, either
+    # a real schema or a legacy placeholder created by the backfill.
+    schema_id: UUID
     dataset_id: UUID | None = None
     dataset_item_id: UUID | None = None
     source_type: str = Field(default="manual", pattern=r"^(manual|model|import|analysis)$")
@@ -80,7 +82,7 @@ class AnnotationSetUpdate(ORMModel):
 class AnnotationSetRead(ORMModel):
     id: UUID
     organization_id: UUID
-    schema_id: UUID | None
+    schema_id: UUID
     dataset_id: UUID | None
     dataset_item_id: UUID | None
     source_type: str

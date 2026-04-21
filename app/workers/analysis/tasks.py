@@ -46,12 +46,19 @@ def run_change_detection_job(self, job_id: str) -> None:
             before_uuid = uuid.UUID(before_set_id)
             after_uuid = uuid.UUID(after_set_id)
 
+            # Inherit schema from the 'after' set so the change-detection output
+            # carries class semantics (migration 047 — schema_id NOT NULL).
+            after_set = session.get(AnnotationSet, after_uuid)
+            if after_set is None:
+                raise ValueError(f"after annotation_set {after_set_id} not found")
+
             # Create output annotation set for changed areas
             output_set = AnnotationSet(
                 name=f"Change Detection Results ({job_id[:8]})",
                 job_id=job.id,
                 organization_id=job.organization_id,
                 source_type="analysis",
+                schema_id=after_set.schema_id,
             )
             session.add(output_set)
             session.flush()

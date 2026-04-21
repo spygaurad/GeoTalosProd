@@ -207,10 +207,9 @@ def execute_post_processing(session, config, input_data, **kwargs):
         "properties": {
             "name": {"type": "string", "title": "Set Name", "default": "Auto-generated"},
             "schema_id": {"type": "string", "format": "uuid", "title": "Annotation Schema", "x-picker": "annotation_schema"},
-            "map_id": {"type": "string", "format": "uuid", "title": "Target Map", "x-picker": "map"},
             "default_status": {"type": "string", "title": "Default Status", "enum": ["draft", "submitted"], "default": "draft"},
         },
-        "required": ["name", "schema_id", "map_id"],
+        "required": ["name", "schema_id"],
     },
     icon="plus-square",
     color="#8B5CF6",
@@ -221,9 +220,10 @@ def execute_create_annotation_set(session, config, input_data, **kwargs):
     predictions = input_data.get("predictions", {})
     annotation_set = AnnotationSet(
         name=config["name"],
-        map_id=uuid.UUID(config["map_id"]),
-        schema_id=uuid.UUID(config["schema_id"]) if config.get("schema_id") else None,
-        created_by_job_id=uuid.UUID(predictions["job_id"]) if predictions.get("job_id") else None,
+        organization_id=uuid.UUID(kwargs["organization_id"]),
+        schema_id=uuid.UUID(config["schema_id"]),
+        source_type="model",
+        job_id=uuid.UUID(predictions["job_id"]) if predictions.get("job_id") else None,
     )
     session.add(annotation_set)
     session.flush()

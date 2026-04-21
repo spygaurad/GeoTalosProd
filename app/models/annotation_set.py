@@ -33,8 +33,13 @@ class AnnotationSet(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
     )
-    schema_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("annotation_schemas.id", ondelete="SET NULL"), nullable=True
+    # schema_id is NOT NULL as of migration 047 (Stage 1, unified platform
+    # plan). Every annotation set carries a schema so raster masks have class
+    # semantics and vector sets have per-class styling/legend data.
+    schema_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("annotation_schemas.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     dataset_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("datasets.id", ondelete="SET NULL"), nullable=True

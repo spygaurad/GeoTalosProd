@@ -60,6 +60,11 @@ def run_inference_job(self, job_id: str) -> None:
             ai_model = session.get(AIModel, uuid.UUID(model_id))
             if not ai_model:
                 raise ValueError(f"AIModel {model_id} not found")
+            if ai_model.annotation_schema_id is None:
+                raise ValueError(
+                    f"AIModel {model_id} has no annotation_schema_id — "
+                    "every annotation set requires a schema since migration 047"
+                )
 
             warnings_all: list[str] = []
 

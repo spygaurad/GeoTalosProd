@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from geoalchemy2 import Geometry
-from sqlalchemy import DateTime, ForeignKey, Index, String, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -11,13 +11,26 @@ from app.db.base import Base
 
 class FeatureLayer(Base):
     __tablename__ = "feature_layers"
-    __table_args__ = (Index("idx_feature_layers_org", "organization_id"),)
+    __table_args__ = (
+        Index("idx_feature_layers_org", "organization_id"),
+        CheckConstraint(
+            "role IN ('reference', 'aoi', 'sketch')",
+            name="ck_feature_layers_role",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
     )
     layer_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # role — 'reference' for read-only overlays (e.g. admin boundaries),
+    # 'aoi' for analysis-of-interest polygons consumed by mosaic search /
+    # vector filters, 'sketch' for user drawing layers. Stage 1 default =
+    # 'reference' keeps every pre-existing row behaviourally unchanged.
+    role: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="reference"
+    )
     geometry: Mapped[bytes] = mapped_column(
         Geometry("GEOMETRY", srid=4326, spatial_index=False), nullable=False
     )

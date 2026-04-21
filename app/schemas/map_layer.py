@@ -17,14 +17,23 @@ class MapLayerCreate(ORMModel):
 
     # Exactly one of these must be set depending on source_type
     dataset_id: UUID | None = None
+    dataset_item_id: UUID | None = None
     stac_item_id: str | None = Field(default=None, max_length=255)
     tile_service_url: str | None = Field(default=None, max_length=500)
     tile_source_id: UUID | None = None
     annotation_set_id: UUID | None = None
+    feature_layer_id: UUID | None = None
+    basemap_id: UUID | None = None
 
     source_config: dict | None = None
     style_id: UUID | None = None
     style_override: dict | None = None
+    # Raster render params passed to titiler (rescale, colormap_name, expression…).
+    render_config: dict | None = None
+    # Attribute filter applied to vector fetches (e.g. {confidence: {gte: 0.7}}).
+    filter_config: dict | None = None
+    # Per-layer AOI polygon (GeoJSON) overriding Map.aoi_geometry for this layer.
+    aoi_filter: dict | None = None
     time_config: dict | None = None
     z_index: int = 0
     visible: bool = True
@@ -42,26 +51,48 @@ class MapLayerCreate(ORMModel):
         st = self.source_type
         if st not in _SOURCE_TYPES:
             raise ValueError(f"source_type must be one of {sorted(_SOURCE_TYPES)}")
-        if st == "dataset":
+        # Stage 1 keeps legacy source types ('dataset', 'stac_item', 'tile_service')
+        # alongside the canonical taxonomy. The check below only enforces the
+        # minimum required identifier per branch and is permissive about extras —
+        # MapLayer.__table_args__ CheckConstraint is the final DB-side gate.
+        if st in ("dataset", "dataset_mosaic"):
             if self.dataset_id is None:
-                raise ValueError("dataset_id is required when source_type is 'dataset'")
-            if self.stac_item_id or self.tile_service_url or self.annotation_set_id:
-                raise ValueError("Only dataset_id may be set when source_type is 'dataset'")
+                raise ValueError(f"dataset_id is required when source_type is '{st}'")
+        elif st == "dataset_item":
+            if self.dataset_item_id is None and self.stac_item_id is None:
+                raise ValueError(
+                    "dataset_item_id or stac_item_id is required when source_type is 'dataset_item'"
+                )
         elif st == "stac_item":
             if self.stac_item_id is None:
                 raise ValueError("stac_item_id is required when source_type is 'stac_item'")
-            if self.dataset_id or self.tile_service_url or self.annotation_set_id:
-                raise ValueError("Only stac_item_id may be set when source_type is 'stac_item'")
+        elif st == "stac_search":
+            if not (self.source_config and "searchid" in self.source_config):
+                raise ValueError(
+                    "source_config.searchid is required when source_type is 'stac_search'"
+                )
         elif st == "tile_service":
             if self.tile_service_url is None and self.tile_source_id is None:
-                raise ValueError("tile_service_url or tile_source_id is required when source_type is 'tile_service'")
-            if self.dataset_id or self.stac_item_id or self.annotation_set_id:
-                raise ValueError("Only tile_service_url/tile_source_id may be set when source_type is 'tile_service'")
+                raise ValueError(
+                    "tile_service_url or tile_source_id is required when source_type is 'tile_service'"
+                )
+        elif st == "tile_source":
+            if self.tile_source_id is None:
+                raise ValueError("tile_source_id is required when source_type is 'tile_source'")
         elif st == "annotation_set":
             if self.annotation_set_id is None:
                 raise ValueError("annotation_set_id is required when source_type is 'annotation_set'")
-            if self.dataset_id or self.stac_item_id or self.tile_service_url or self.tile_source_id:
-                raise ValueError("Only annotation_set_id may be set when source_type is 'annotation_set'")
+        elif st == "feature_layer":
+            if self.feature_layer_id is None:
+                raise ValueError("feature_layer_id is required when source_type is 'feature_layer'")
+        elif st == "basemap":
+            if self.basemap_id is None:
+                raise ValueError("basemap_id is required when source_type is 'basemap'")
+        elif st == "xarray_variable":
+            if not (self.source_config and "variable_ref" in self.source_config):
+                raise ValueError(
+                    "source_config.variable_ref is required when source_type is 'xarray_variable'"
+                )
 
         # zoom range
         if self.min_zoom is not None and self.max_zoom is not None:
@@ -76,6 +107,9 @@ class MapLayerUpdate(ORMModel):
     source_config: dict | None = None
     style_id: UUID | None = None
     style_override: dict | None = None
+    render_config: dict | None = None
+    filter_config: dict | None = None
+    aoi_filter: dict | None = None
     time_config: dict | None = None
     # Non-nullable DB columns — typed Optional only so Pydantic treats them as
     # "not provided" when absent from the request body. Explicit null is rejected
@@ -109,13 +143,18 @@ class MapLayerRead(ORMModel):
     layer_type: str
     source_type: str
     dataset_id: UUID | None
+    dataset_item_id: UUID | None = None
     stac_item_id: str | None
     tile_service_url: str | None
     tile_source_id: UUID | None
     annotation_set_id: UUID | None
+    feature_layer_id: UUID | None = None
+    basemap_id: UUID | None = None
     source_config: dict | None
     style_id: UUID | None
     style_override: dict | None
+    render_config: dict | None = None
+    filter_config: dict | None = None
     time_config: dict | None
     z_index: int
     visible: bool

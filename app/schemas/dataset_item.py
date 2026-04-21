@@ -17,6 +17,9 @@ class DatasetItemRead(ORMModel):
     geometry: dict | None
     item_datetime: datetime | None
     properties_cache: dict | None
+    item_type: str = "imagery"
+    derived_from_item_id: UUID | None = None
+    derivation_config: dict | None = None
     is_active: bool
     created_at: datetime
 

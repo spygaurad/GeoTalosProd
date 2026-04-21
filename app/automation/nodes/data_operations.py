@@ -98,10 +98,18 @@ def execute_merge_annotation_sets(session, config, input_data, **kwargs):
     if not set_ids:
         return {"merged": {}}
 
-    # Create a new merged annotation set
+    # Inherit organization + schema from the first source set so the merged
+    # output carries class semantics (migration 047 — schema_id NOT NULL).
+    first_source = session.get(AnnotationSet, uuid.UUID(set_ids[0]))
+    if first_source is None:
+        raise ValueError(f"annotation_set {set_ids[0]} not found")
+
     merged = AnnotationSet(
-        map_id=uuid.UUID(config["map_id"]),
+        organization_id=first_source.organization_id,
+        schema_id=first_source.schema_id,
         name=config.get("name") or "Merged",
+        source_type="analysis",
+        job_id=kwargs.get("job_id"),
     )
     session.add(merged)
     session.flush()

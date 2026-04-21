@@ -436,9 +436,17 @@ def execute_change_detection(session, config, input_data, **kwargs):
 
     # geometry_difference method: inline PostGIS
     else:
-        # Create output annotation set for changed areas
+        # Inherit org + schema from the 'after' set so the output carries class
+        # semantics (migration 047 — schema_id NOT NULL).
+        after_set_row = session.get(AnnotationSet, after_uuid)
+        if after_set_row is None:
+            raise ValueError(f"annotation_set {after_id} not found")
+
         output_set = AnnotationSet(
             name=f"Change Detection: {before_set.get('name', 'Before')} → {after_set.get('name', 'After')}",
+            organization_id=after_set_row.organization_id,
+            schema_id=after_set_row.schema_id,
+            source_type="analysis",
         )
         session.add(output_set)
         session.flush()

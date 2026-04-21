@@ -56,6 +56,13 @@ async def run_sam3_inference(
             status_code=400,
             detail="Model has no endpoint_url configured",
         )
+    if ai_model.annotation_schema_id is None:
+        # Stage 1 of the unified platform plan: every annotation set must carry
+        # a schema. Fail fast rather than hitting the DB NOT NULL on insert.
+        raise HTTPException(
+            status_code=400,
+            detail="Model has no annotation_schema_id configured",
+        )
 
     # 2. Validate dataset_item is in org
     item_result = await db.execute(

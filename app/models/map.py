@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 
+from geoalchemy2 import Geometry
 from sqlalchemy import DateTime, ForeignKey, Index, String, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -19,6 +20,12 @@ class Map(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     view_state: Mapped[dict] = mapped_column(JSONB, nullable=False)
     base_style: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # First-class map-level AOI. When set, mosaic registrations pass
+    # ``intersects=`` to pgSTAC search and vector fetches apply ST_Intersects.
+    # Per-layer ``MapLayer.aoi_filter`` overrides this for a single layer.
+    aoi_geometry: Mapped[object | None] = mapped_column(
+        Geometry("GEOMETRY", srid=4326, spatial_index=False), nullable=True
+    )
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

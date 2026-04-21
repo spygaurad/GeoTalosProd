@@ -12,6 +12,10 @@ class MapCreate(ORMModel):
     name: str = Field(min_length=1, max_length=255)
     view_state: dict
     base_style: dict | None = None
+    # Optional map-scoped AOI polygon (GeoJSON). When set, mosaic registrations
+    # and vector fetches are clipped to this geometry unless a per-layer
+    # ``MapLayer.aoi_filter`` overrides it.
+    aoi_geometry: dict | None = None
 
 
 class LayerStateUpdate(ORMModel):
@@ -31,6 +35,7 @@ class MapUpdate(ORMModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     view_state: dict | None = None
     base_style: dict | None = None
+    aoi_geometry: dict | None = None
     # Optional batch layer state — used by the unified 8-second debounced auto-save.
     # When present the service applies each LayerStateUpdate to its corresponding
     # MapLayer row in the same transaction as the map update.
@@ -43,6 +48,7 @@ class MapRead(ORMModel):
     name: str
     view_state: dict
     base_style: dict | None
+    aoi_geometry: dict | None = None
     created_by: UUID | None
     created_at: datetime
     updated_at: datetime

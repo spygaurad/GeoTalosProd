@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    adapters,
     annotation_classes,
     annotation_schemas,
     annotation_sets,
@@ -12,7 +13,6 @@ from app.api.v1.endpoints import (
     events,
     feature_layers,
     health,
-    inference,
     jobs,
     map_layers,
     maps,
@@ -41,8 +41,8 @@ api_router.include_router(maps.router)
 api_router.include_router(map_layers.router)
 api_router.include_router(datasets.router)
 api_router.include_router(models.router)
-api_router.include_router(inference.router)
 api_router.include_router(jobs.router)
+api_router.include_router(adapters.router)
 api_router.include_router(stac.router)
 api_router.include_router(tiles.router)
 api_router.include_router(styles.router)

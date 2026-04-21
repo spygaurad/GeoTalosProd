@@ -73,23 +73,27 @@ def execute_run_inference(session, config, input_data, **kwargs):
     job = Job(
         organization_id=uuid.UUID(kwargs["organization_id"]),
         type="inference",
-        status="pending",
+        status="queued",
         config={
-            "model_id": model["id"],
-            "confidence_threshold": config.get("confidence_threshold", 0.5),
-            "batch_size": config.get("batch_size", 100),
-            "item_ids": [i["id"] for i in items],
+            "trigger": "automation",
+            "run_output_config": {
+                # Per-run knobs forwarded to ModelManager on top of the
+                # model's own output_config JSONB.
+                "confidence_threshold": config.get("confidence_threshold", 0.5),
+                "batch_size": config.get("batch_size", 100),
+            },
             "automation_run_id": kwargs.get("run_id"),
             "automation_step_id": kwargs.get("step_id"),
         },
+        input_refs=[{"type": "dataset_item", "id": i["id"]} for i in items],
         total_items=len(items),
         model_id=uuid.UUID(model["id"]),
     )
     session.add(job)
     session.flush()
 
-    from app.workers.inference.tasks import run_inference_job
-    run_inference_job.delay(str(job.id))
+    from app.workers.inference.tasks import run_inference_batch
+    run_inference_batch.delay(str(job.id))
 
     return DeferToJob(job_id=str(job.id))
 

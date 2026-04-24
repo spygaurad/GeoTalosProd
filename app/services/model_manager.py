@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -96,11 +97,21 @@ class ModelManager:
         item: DatasetItem,
         context: dict[str, Any],
         output_cfg: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], bool]:
+    ) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
         patch_size_px = int(output_cfg.get("patch_size_px", self._DEFAULT_PATCH_SIZE))
         stride_px_cfg = output_cfg.get("stride_px")
         stride_px = int(stride_px_cfg) if stride_px_cfg is not None else None
         max_patches = int(output_cfg.get("max_patches_per_item", self._DEFAULT_MAX_PATCHES))
+        aoi_bbox = output_cfg.get("aoi_bbox")
+        effective_aoi = self._resolve_effective_aoi(
+            item_bbox=context["bbox"],
+            item_width=context.get("width"),
+            item_height=context.get("height"),
+            aoi_bbox=aoi_bbox,
+        )
+
+        if effective_aoi["skip_item"]:
+            return [], False, effective_aoi
 
         windows, capped = PatchService.generate(
             item_id=str(item.id),
@@ -110,8 +121,65 @@ class ModelManager:
             patch_size_px=patch_size_px,
             stride_px=stride_px,
             max_patches=max_patches,
+            clip_bbox=effective_aoi["effective_bbox"],
         )
-        return [w.as_dict() for w in windows], capped
+        return [w.as_dict() for w in windows], capped, effective_aoi
+
+    def _resolve_effective_aoi(
+        self,
+        *,
+        item_bbox: list[float],
+        item_width: int | None,
+        item_height: int | None,
+        aoi_bbox: list[float] | None,
+    ) -> dict[str, Any]:
+        if aoi_bbox is None:
+            return {
+                "requested_bbox": None,
+                "effective_bbox": item_bbox,
+                "used_full_item": True,
+                "skip_item": False,
+            }
+
+        minx = max(item_bbox[0], aoi_bbox[0])
+        miny = max(item_bbox[1], aoi_bbox[1])
+        maxx = min(item_bbox[2], aoi_bbox[2])
+        maxy = min(item_bbox[3], aoi_bbox[3])
+        if minx >= maxx or miny >= maxy:
+            return {
+                "requested_bbox": aoi_bbox,
+                "effective_bbox": None,
+                "used_full_item": False,
+                "skip_item": True,
+            }
+
+        effective_bbox = [float(minx), float(miny), float(maxx), float(maxy)]
+        used_full_item = effective_bbox == [float(v) for v in item_bbox]
+
+        if not used_full_item and item_width and item_height:
+            lon_span = item_bbox[2] - item_bbox[0]
+            lat_span = item_bbox[3] - item_bbox[1]
+            if lon_span > 0 and lat_span > 0:
+                window_width = max(
+                    1, math.ceil(((effective_bbox[2] - effective_bbox[0]) / lon_span) * item_width)
+                )
+                window_height = max(
+                    1, math.ceil(((effective_bbox[3] - effective_bbox[1]) / lat_span) * item_height)
+                )
+                if window_width < 1 or window_height < 1:
+                    return {
+                        "requested_bbox": aoi_bbox,
+                        "effective_bbox": None,
+                        "used_full_item": False,
+                        "skip_item": True,
+                    }
+
+        return {
+            "requested_bbox": aoi_bbox,
+            "effective_bbox": effective_bbox,
+            "used_full_item": used_full_item,
+            "skip_item": False,
+        }
 
     def _fetch_patch_png(
         self,
@@ -264,11 +332,24 @@ class ModelManager:
 
             try:
                 context = self._dataset_item_context(item)
-                patch_metadata, capped = self._build_patch_metadata(
+                patch_metadata, capped, aoi_state = self._build_patch_metadata(
                     item=item,
                     context=context,
                     output_cfg=output_cfg,
                 )
+                if aoi_state["skip_item"]:
+                    failed += 1
+                    job.processed_items = processed
+                    job.failed_items = failed
+                    job.progress = idx / total if total else 1.0
+                    logger.info(
+                        "inference_item_skipped_no_aoi_overlap job_id=%s item_id=%s requested_aoi=%s",
+                        job.id,
+                        item.id,
+                        aoi_state["requested_bbox"],
+                    )
+                    self.session.commit()
+                    continue
 
                 annotation_set = AnnotationSet(
                     organization_id=job.organization_id,
@@ -320,6 +401,9 @@ class ModelManager:
                         "parent_bbox": context["bbox"],
                         "parent_width": context.get("width"),
                         "parent_height": context.get("height"),
+                        "requested_aoi_bbox": aoi_state["requested_bbox"],
+                        "effective_aoi_bbox": aoi_state["effective_bbox"],
+                        "used_full_item": aoi_state["used_full_item"],
                     }
                     try:
                         patch_png_b64 = self._fetch_patch_png(
@@ -394,12 +478,15 @@ class ModelManager:
                 processed += 1
                 logger.info(
                     "inference_item_processed job_id=%s item_id=%s patches=%s "
-                    "patches_capped=%s created_annotations=%s",
+                    "patches_capped=%s created_annotations=%s effective_aoi=%s "
+                    "used_full_item=%s",
                     job.id,
                     item.id,
                     len(patch_metadata),
                     capped,
                     created_annotations,
+                    aoi_state["effective_bbox"],
+                    aoi_state["used_full_item"],
                 )
             except Exception as exc:  # noqa: BLE001
                 self.session.rollback()

@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.schemas.common import ORMModel
 
@@ -32,6 +32,18 @@ class InferenceJobCreate(ORMModel):
     project_id: UUID | None = None
     map_id: UUID | None = None
     mount_on_map: bool = False
+    aoi_bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
     patch_size_px: int | None = Field(default=None, ge=64, le=4096)
     stride_px: int | None = Field(default=None, ge=32, le=4096)
     max_patches_per_item: int | None = Field(default=None, ge=1, le=4096)
+
+    @model_validator(mode="after")
+    def validate_aoi_bbox(self):
+        if self.aoi_bbox is None:
+            return self
+        minx, miny, maxx, maxy = self.aoi_bbox
+        if minx >= maxx or miny >= maxy:
+            raise ValueError("aoi_bbox must be [minx, miny, maxx, maxy] with min < max")
+        if minx < -180 or maxx > 180 or miny < -90 or maxy > 90:
+            raise ValueError("aoi_bbox must be within EPSG:4326 bounds")
+        return self

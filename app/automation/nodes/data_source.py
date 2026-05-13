@@ -47,6 +47,10 @@ def _serialize_dataset_item(item) -> dict:
     }
 
 
+def _uuid_list(values: list | None) -> list[uuid.UUID]:
+    return [v if isinstance(v, uuid.UUID) else uuid.UUID(str(v)) for v in (values or [])]
+
+
 @node(
     type="select_dataset",
     category="data_source",
@@ -477,5 +481,117 @@ def execute_select_map_dataset_items_in_aoi(session, config, input_data, **kwarg
             "datasets": [_serialize_dataset(dataset)],
             "dataset_ids": [str(dataset_id)],
             "dataset_items": items_payload,
+        },
+    }
+
+
+@node(
+    type="select_saved_map_aoi",
+    category="data_source",
+    label="Select Saved Map AOI",
+    description="Load a saved AOI with its persisted selection and rendering state.",
+    outputs=[HandleDef(handle="selection", type="map_selection", label="Map Selection")],
+    config_schema={
+        "type": "object",
+        "properties": {
+            "map_id": {"type": "string", "format": "uuid", "title": "Map", "x-picker": "map"},
+            "aoi_id": {"type": "string", "format": "uuid", "title": "Saved AOI"},
+        },
+        "required": ["map_id", "aoi_id"],
+    },
+    icon="bookmark",
+    color="#3B82F6",
+)
+def execute_select_saved_map_aoi(session, config, input_data, **kwargs):
+    from app.models.map_aoi import MapAOI
+
+    map_id = uuid.UUID(config["map_id"])
+    aoi_id = uuid.UUID(config["aoi_id"])
+    aoi = session.get(MapAOI, aoi_id)
+    if not aoi or aoi.map_id != map_id or aoi.deleted_at is not None:
+        raise ValueError(f"Saved AOI {config['aoi_id']} not found on map {config['map_id']}")
+
+    selection_cfg = aoi.selection_config or {}
+    return {
+        "selection": {
+            "map_id": str(map_id),
+            "aoi_id": str(aoi.id),
+            "aoi_bbox": aoi.bbox_4326,
+            "geometry": aoi.geometry,
+            "dataset_ids": [str(v) for v in selection_cfg.get("dataset_ids", [])],
+            "dataset_item_ids": [str(v) for v in selection_cfg.get("dataset_item_ids", [])],
+            "render_config": aoi.render_config or {},
+            "temporal_config": aoi.temporal_config or {},
+            "analysis_config": aoi.analysis_config or {},
+        }
+    }
+
+
+@node(
+    type="load_saved_map_aoi_timeline",
+    category="data_source",
+    label="Load Saved AOI Timeline",
+    description="Resolve saved AOI dataset items ordered by timestamp for analysis or playback.",
+    outputs=[
+        HandleDef(handle="items", type="dataset_items", label="Dataset Items"),
+        HandleDef(handle="selection", type="map_selection", label="Map Selection"),
+    ],
+    config_schema={
+        "type": "object",
+        "properties": {
+            "map_id": {"type": "string", "format": "uuid", "title": "Map", "x-picker": "map"},
+            "aoi_id": {"type": "string", "format": "uuid", "title": "Saved AOI"},
+        },
+        "required": ["map_id", "aoi_id"],
+    },
+    icon="clock",
+    color="#3B82F6",
+)
+def execute_load_saved_map_aoi_timeline(session, config, input_data, **kwargs):
+    from sqlalchemy import select
+
+    from app.models.dataset_item import DatasetItem
+    from app.models.map_aoi import MapAOI
+
+    map_id = uuid.UUID(config["map_id"])
+    aoi_id = uuid.UUID(config["aoi_id"])
+    aoi = session.get(MapAOI, aoi_id)
+    if not aoi or aoi.map_id != map_id or aoi.deleted_at is not None:
+        raise ValueError(f"Saved AOI {config['aoi_id']} not found on map {config['map_id']}")
+
+    selection_cfg = aoi.selection_config or {}
+    dataset_item_ids = _uuid_list(selection_cfg.get("dataset_item_ids"))
+    dataset_ids = _uuid_list(selection_cfg.get("dataset_ids"))
+    stmt = select(DatasetItem).where(DatasetItem.is_active.is_(True))
+    if dataset_item_ids:
+        stmt = stmt.where(DatasetItem.id.in_(dataset_item_ids))
+    elif dataset_ids:
+        stmt = stmt.where(DatasetItem.dataset_id.in_(dataset_ids))
+    else:
+        return {
+            "items": [],
+            "selection": {
+                "map_id": str(map_id),
+                "aoi_id": str(aoi.id),
+                "aoi_bbox": aoi.bbox_4326,
+                "render_config": aoi.render_config or {},
+            },
+        }
+
+    items = session.execute(stmt).scalars().all()
+    matched = [item for item in items if _geometry_intersects_bbox(item.geometry, aoi.bbox_4326)]
+    matched.sort(key=lambda item: (item.item_datetime is None, item.item_datetime, item.created_at))
+    items_payload = [_serialize_dataset_item(item) for item in matched]
+    return {
+        "items": items_payload,
+        "selection": {
+            "map_id": str(map_id),
+            "aoi_id": str(aoi.id),
+            "aoi_bbox": aoi.bbox_4326,
+            "dataset_ids": [str(v) for v in selection_cfg.get("dataset_ids", [])],
+            "dataset_item_ids": [str(v) for v in selection_cfg.get("dataset_item_ids", [])],
+            "render_config": aoi.render_config or {},
+            "temporal_config": aoi.temporal_config or {},
+            "analysis_config": aoi.analysis_config or {},
         },
     }

@@ -15,6 +15,7 @@ from app.api.v1.endpoints import (
     health,
     jobs,
     map_layers,
+    map_aois,
     maps,
     models,
     organization_members,
@@ -38,6 +39,7 @@ api_router.include_router(users.router)
 api_router.include_router(organization_members.router)
 api_router.include_router(projects.router)
 api_router.include_router(maps.router)
+api_router.include_router(map_aois.router)
 api_router.include_router(map_layers.router)
 api_router.include_router(datasets.router)
 api_router.include_router(models.router)

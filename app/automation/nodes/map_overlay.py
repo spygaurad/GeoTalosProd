@@ -45,6 +45,77 @@ def execute_overlay_on_map(session, config, input_data, **kwargs):
 
 
 @node(
+    type="overlay_inference_outputs_on_map",
+    category="map_overlay",
+    label="Overlay Inference Outputs",
+    description="Mount all annotation sets produced by an inference job onto a map.",
+    inputs=[HandleDef(handle="predictions", type="raw_predictions", label="Predictions")],
+    outputs=[HandleDef(handle="selection", type="map_selection", label="Map Selection")],
+    config_schema={
+        "type": "object",
+        "properties": {
+            "map_id": {"type": "string", "format": "uuid", "title": "Target Map", "x-picker": "map"},
+            "visible": {"type": "boolean", "title": "Visible", "default": True},
+            "opacity": {"type": "number", "title": "Opacity", "default": 1.0, "minimum": 0, "maximum": 1},
+            "z_index": {"type": "integer", "title": "Z Index", "default": 0},
+        },
+        "required": ["map_id"],
+    },
+    icon="layers",
+    color="#06B6D4",
+)
+def execute_overlay_inference_outputs_on_map(session, config, input_data, **kwargs):
+    """Mount each annotation set from an inference job to the target map."""
+    from sqlalchemy import select
+
+    from app.models.map_annotation_set import MapAnnotationSet
+
+    predictions = input_data.get("predictions", {})
+    annotation_set_ids = predictions.get("annotation_set_ids") or []
+    if not annotation_set_ids:
+        return {
+            "selection": {
+                "map_id": config["map_id"],
+                "mounted_annotation_set_ids": [],
+            }
+        }
+
+    map_id = uuid.UUID(config["map_id"])
+    visible = config.get("visible", True)
+    opacity = float(config.get("opacity", 1.0))
+    z_index = int(config.get("z_index", 0))
+    mounted_ids: list[str] = []
+
+    for aset_id_str in annotation_set_ids:
+        aset_id = uuid.UUID(aset_id_str)
+        existing = session.execute(
+            select(MapAnnotationSet).where(
+                MapAnnotationSet.map_id == map_id,
+                MapAnnotationSet.annotation_set_id == aset_id,
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            session.add(
+                MapAnnotationSet(
+                    map_id=map_id,
+                    annotation_set_id=aset_id,
+                    visible=visible,
+                    opacity=opacity,
+                    z_index=z_index,
+                )
+            )
+        mounted_ids.append(aset_id_str)
+
+    session.flush()
+    return {
+        "selection": {
+            "map_id": str(map_id),
+            "mounted_annotation_set_ids": mounted_ids,
+        }
+    }
+
+
+@node(
     type="overlay_dataset_on_map",
     category="map_overlay",
     label="Overlay Dataset on Map",

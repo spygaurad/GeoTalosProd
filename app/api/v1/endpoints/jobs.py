@@ -18,20 +18,13 @@ from app.services.job_service import JobService
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
-@router.post("/inference", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
-async def create_inference_job(
+async def _create_inference_job(
     payload: InferenceJobCreate,
-    org_id: UUID = Depends(require_org_role("org:member")),
-    db: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    """Model-agnostic batch inference.
-
-    Validates the model + dataset_items + optional project/map, then enqueues a
-    Celery job that ``ModelManager`` runs. Framework-specific behaviour is
-    driven by the model's ``output_config.adapter`` + ``request_config``; this
-    endpoint is the same for every model.
-    """
+    *,
+    org_id: UUID,
+    db: AsyncSession,
+    current_user: User,
+) -> Job:
     model = await db.scalar(
         select(AIModel).where(
             AIModel.id == payload.model_id,
@@ -85,6 +78,7 @@ async def create_inference_job(
             "project_id": str(payload.project_id) if payload.project_id else None,
             "map_id": str(payload.map_id) if payload.map_id else None,
             "mount_on_map": payload.mount_on_map,
+            "aoi_bbox": payload.aoi_bbox,
         }
     )
     if payload.patch_size_px is not None:
@@ -121,6 +115,28 @@ async def create_inference_job(
 
     run_inference_batch.apply_async(args=[str(job.id)])
     return job
+
+
+@router.post("/inference", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+async def create_inference_job(
+    payload: InferenceJobCreate,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Model-agnostic batch inference.
+
+    Validates the model + dataset_items + optional project/map, then enqueues a
+    Celery job that ``ModelManager`` runs. Framework-specific behaviour is
+    driven by the model's ``output_config.adapter`` + ``request_config``; this
+    endpoint is the same for every model.
+    """
+    return await _create_inference_job(
+        payload,
+        org_id=org_id,
+        db=db,
+        current_user=current_user,
+    )
 
 
 @router.get("/{job_id}", response_model=JobRead)

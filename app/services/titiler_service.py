@@ -846,6 +846,48 @@ async def get_collection_preview(
     return resp.content
 
 
+async def get_item_bbox_preview(
+    collection_id: str,
+    item_id: str,
+    *,
+    bbox: list[float],
+    width: int = 512,
+    height: int = 512,
+    format: str = "png",
+    assets: str | None = None,
+    rescale: str | None = None,
+    colormap_name: str | None = None,
+) -> bytes:
+    """Fetch a preview image for a single STAC item clipped to a bbox."""
+    if not bbox:
+        raise ValueError("bbox is required for item bbox preview")
+
+    bbox_str = ",".join(str(v) for v in bbox)
+    path = f"/collections/{collection_id}/items/{item_id}/bbox/{bbox_str}/{width}x{height}.{format}"
+
+    params: dict[str, Any] = {}
+    if assets:
+        params["assets"] = assets
+    if rescale:
+        params["rescale"] = rescale
+    if colormap_name:
+        params["colormap_name"] = colormap_name
+
+    client = _get_client()
+    try:
+        resp = await client.get(path, params=params, timeout=60.0)
+    except httpx.TimeoutException:
+        raise RuntimeError("TiTiler item bbox request timed out")
+    except httpx.ConnectError:
+        raise RuntimeError("Cannot reach TiTiler service")
+
+    if resp.status_code != 200:
+        logger.error("titiler_item_bbox_failed path=%s status=%s", path, resp.status_code)
+        raise RuntimeError(f"TiTiler item bbox request failed: HTTP {resp.status_code}")
+
+    return resp.content
+
+
 # ---------------------------------------------------------------------------
 # Enhanced Streaming: Point Queries
 # ---------------------------------------------------------------------------

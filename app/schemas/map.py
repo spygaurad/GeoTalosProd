@@ -4,6 +4,10 @@ from uuid import UUID
 from pydantic import Field
 
 from app.schemas.common import ORMModel, PaginatedResponse
+from app.schemas.dataset import DatasetRead
+from app.schemas.dataset_item import DatasetItemRead
+from app.schemas.annotation_set import AnnotationSetRead
+from app.schemas.job import InferenceJobCreate, JobRead
 from app.schemas.map_layer import MapLayerRead
 
 
@@ -52,3 +56,39 @@ class MapRead(ORMModel):
 
 
 MapListResponse = PaginatedResponse[MapRead]
+
+
+class MapAOIResourcesRead(ORMModel):
+    bbox: list[float]
+    datasets: list[DatasetRead] = Field(default_factory=list)
+    dataset_items: list[DatasetItemRead] = Field(default_factory=list)
+    vector_annotation_sets: list[AnnotationSetRead] = Field(default_factory=list)
+    raster_mask_annotation_sets: list[AnnotationSetRead] = Field(default_factory=list)
+
+
+class MapInferenceCreate(ORMModel):
+    dataset_item_ids: list[UUID] = Field(min_length=1)
+    aoi_bbox: list[float] | None = None
+    project_id: UUID | None = None
+    mount_on_map: bool = False
+    patch_size_px: int | None = Field(default=None, ge=64, le=4096)
+    stride_px: int | None = Field(default=None, ge=32, le=4096)
+    max_patches_per_item: int | None = Field(default=None, ge=1, le=4096)
+    model_id: UUID
+
+    def to_inference_job(self, *, map_id: UUID) -> InferenceJobCreate:
+        return InferenceJobCreate(
+            model_id=self.model_id,
+            dataset_item_ids=self.dataset_item_ids,
+            project_id=self.project_id,
+            map_id=map_id,
+            mount_on_map=self.mount_on_map,
+            aoi_bbox=self.aoi_bbox,
+            patch_size_px=self.patch_size_px,
+            stride_px=self.stride_px,
+            max_patches_per_item=self.max_patches_per_item,
+        )
+
+
+class MapInferenceResponse(ORMModel):
+    job: JobRead

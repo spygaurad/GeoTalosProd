@@ -41,4 +41,9 @@ class Map(Base):
         back_populates="map",
         cascade="all, delete-orphan",
     )
+    aois: Mapped[list["MapAOI"]] = relationship(
+        "MapAOI",
+        back_populates="map",
+        cascade="all, delete-orphan",
+    )
     creator: Mapped["User | None"] = relationship("User", foreign_keys=[created_by])

@@ -12,6 +12,7 @@ from app.models.feature_layer import FeatureLayer
 from app.models.job import Job
 from app.models.job_output import JobOutput
 from app.models.map import Map
+from app.models.map_aoi import MapAOI
 from app.models.map_annotation_set import MapAnnotationSet
 from app.models.map_layer import MapLayer
 from app.models.model_class_mapping import ModelClassMapping
@@ -41,6 +42,7 @@ __all__ = [
     "Job",
     "JobOutput",
     "Map",
+    "MapAOI",
     "MapAnnotationSet",
     "MapLayer",
     "ModelClassMapping",

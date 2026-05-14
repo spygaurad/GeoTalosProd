@@ -37,6 +37,7 @@ HANDLE_TYPES = [
     {"type": "trigger_data", "label": "Trigger Data", "description": "Pipeline trigger context", "color": "#9333EA"},
     {"type": "dataset", "label": "Dataset", "description": "A dataset reference", "color": "#3B82F6"},
     {"type": "dataset_items", "label": "Dataset Items", "description": "List of COG files", "color": "#3B82F6"},
+    {"type": "map_selection", "label": "Map Selection", "description": "Map/AOI resource selection payload", "color": "#0EA5E9"},
     {"type": "annotation_set", "label": "Annotation Set", "description": "Set of labeled geometries", "color": "#10B981"},
     {"type": "model", "label": "Model", "description": "ML model reference", "color": "#8B5CF6"},
     {"type": "raw_predictions", "label": "Raw Predictions", "description": "Unprocessed model output", "color": "#F59E0B"},

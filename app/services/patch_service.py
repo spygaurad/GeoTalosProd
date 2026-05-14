@@ -37,6 +37,45 @@ class PatchService:
     """Generate fixed-size patch windows for a dataset item context."""
 
     @staticmethod
+    def _intersect_bbox(a: list[float], b: list[float]) -> list[float] | None:
+        minx = max(a[0], b[0])
+        miny = max(a[1], b[1])
+        maxx = min(a[2], b[2])
+        maxy = min(a[3], b[3])
+        if minx >= maxx or miny >= maxy:
+            return None
+        return [float(minx), float(miny), float(maxx), float(maxy)]
+
+    @staticmethod
+    def _pixel_window_for_bbox(
+        *,
+        item_bbox: list[float],
+        item_width: int,
+        item_height: int,
+        window_bbox: list[float],
+    ) -> tuple[int, int, int, int]:
+        import math
+
+        min_lon, min_lat, max_lon, max_lat = item_bbox
+        lon_span = max_lon - min_lon
+        lat_span = max_lat - min_lat
+        if lon_span <= 0 or lat_span <= 0:
+            return 0, 0, item_width, item_height
+
+        win_minx, win_miny, win_maxx, win_maxy = window_bbox
+        x1 = math.floor(((win_minx - min_lon) / lon_span) * item_width)
+        x2 = math.ceil(((win_maxx - min_lon) / lon_span) * item_width)
+        y1 = math.floor(((max_lat - win_maxy) / lat_span) * item_height)
+        y2 = math.ceil(((max_lat - win_miny) / lat_span) * item_height)
+
+        x1 = max(0, min(item_width, x1))
+        x2 = max(0, min(item_width, x2))
+        y1 = max(0, min(item_height, y1))
+        y2 = max(0, min(item_height, y2))
+
+        return x1, y1, max(1, x2 - x1), max(1, y2 - y1)
+
+    @staticmethod
     def _axis_starts(length: int, patch: int, stride: int) -> list[int]:
         if length <= 0:
             return [0]
@@ -79,6 +118,7 @@ class PatchService:
         patch_size_px: int,
         stride_px: int | None = None,
         max_patches: int = 1024,
+        clip_bbox: list[float] | None = None,
     ) -> tuple[list[PatchWindow], bool]:
         stride = stride_px or patch_size_px
         if stride > patch_size_px:
@@ -88,15 +128,32 @@ class PatchService:
 
         width = int(item_width or 0)
         height = int(item_height or 0)
+        window_bbox = item_bbox
+        origin_x = 0
+        origin_y = 0
+
+        if clip_bbox is not None:
+            intersected = cls._intersect_bbox(item_bbox, clip_bbox)
+            if intersected is None:
+                return [], False
+            window_bbox = intersected
+            if width > 0 and height > 0:
+                origin_x, origin_y, width, height = cls._pixel_window_for_bbox(
+                    item_bbox=item_bbox,
+                    item_width=width,
+                    item_height=height,
+                    window_bbox=window_bbox,
+                )
+
         if width <= 0 or height <= 0:
             patch = PatchWindow(
                 patch_id=f"{item_id}:0",
                 patch_index=0,
-                x=0,
-                y=0,
+                x=origin_x,
+                y=origin_y,
                 width_px=max(width, 0),
                 height_px=max(height, 0),
-                bbox=item_bbox,
+                bbox=window_bbox,
             )
             return [patch], False
 
@@ -112,16 +169,18 @@ class PatchService:
                     break
                 width_px = min(patch_size_px, width - x)
                 height_px = min(patch_size_px, height - y)
+                patch_x = origin_x + x
+                patch_y = origin_y + y
                 windows.append(
                     PatchWindow(
                         patch_id=f"{item_id}:{patch_index}",
                         patch_index=patch_index,
-                        x=x,
-                        y=y,
+                        x=patch_x,
+                        y=patch_y,
                         width_px=width_px,
                         height_px=height_px,
                         bbox=cls._patch_bbox(
-                            item_bbox=item_bbox,
+                            item_bbox=window_bbox,
                             item_width=width,
                             item_height=height,
                             x=x,

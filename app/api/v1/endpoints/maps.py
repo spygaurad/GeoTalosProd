@@ -1,17 +1,65 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from shapely.geometry import box, shape
+from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_session, require_org_role
+from app.api.v1.endpoints.jobs import _create_inference_job
 from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
+from app.models.annotation import Annotation
+from app.models.annotation_set import AnnotationSet
+from app.models.dataset import Dataset
+from app.models.dataset_item import DatasetItem
+from app.models.map_annotation_set import MapAnnotationSet
+from app.models.map_layer import MapLayer
 from app.models.user import User
-from app.schemas.map import MapCreate, MapListResponse, MapRead, MapUpdate
+from app.schemas.dataset import DatasetListResponse
+from app.schemas.dataset_item import DatasetItemListResponse
+from app.schemas.job import JobRead
+from app.schemas.map import (
+    MapAOIResourcesRead,
+    MapCreate,
+    MapInferenceCreate,
+    MapListResponse,
+    MapRead,
+    MapUpdate,
+)
 from app.services.map_service import MapService
 from app.services.project_service import ProjectService
+from app.services import titiler_service
 
 router = APIRouter(prefix="/maps", tags=["maps"])
+
+
+def _parse_bbox(bbox: str) -> list[float]:
+    try:
+        parts = [float(v.strip()) for v in bbox.split(",")]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="bbox must be comma-separated numbers") from exc
+    if len(parts) != 4:
+        raise HTTPException(status_code=400, detail="bbox must be minx,miny,maxx,maxy")
+    minx, miny, maxx, maxy = parts
+    if minx >= maxx or miny >= maxy:
+        raise HTTPException(status_code=400, detail="bbox must have minx < maxx and miny < maxy")
+    if minx < -180 or maxx > 180 or miny < -90 or maxy > 90:
+        raise HTTPException(status_code=400, detail="bbox must be within EPSG:4326 bounds")
+    return parts
+
+
+def _bbox_intersects(a: list[float], b: list[float]) -> bool:
+    return max(a[0], b[0]) < min(a[2], b[2]) and max(a[1], b[1]) < min(a[3], b[3])
+
+
+def _geometry_intersects_bbox(geometry: dict | None, bbox_4326: list[float]) -> bool:
+    if not geometry:
+        return False
+    try:
+        return shape(geometry).intersects(box(*bbox_4326))
+    except Exception:
+        return False
 
 
 @router.get("", response_model=MapListResponse)
@@ -105,4 +153,326 @@ async def delete_map_by_id(
         entity="map",
         entity_id=str(map_id),
         session=db,
+    )
+
+
+@router.get("/{map_id}/datasets", response_model=DatasetListResponse)
+async def list_map_datasets(
+    map_id: UUID,
+    limit: int = Depends(limit_param),
+    offset: int = Depends(offset_param),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    service = MapService(db)
+    await service.get_map(map_id, organization_id=org_id)
+
+    base_query = (
+        select(Dataset)
+        .join(MapLayer, MapLayer.dataset_id == Dataset.id)
+        .where(
+            MapLayer.map_id == map_id,
+            Dataset.organization_id == org_id,
+            Dataset.deleted_at.is_(None),
+        )
+        .distinct()
+    )
+    count_query = (
+        select(distinct(Dataset.id))
+        .join(MapLayer, MapLayer.dataset_id == Dataset.id)
+        .where(
+            MapLayer.map_id == map_id,
+            Dataset.organization_id == org_id,
+            Dataset.deleted_at.is_(None),
+        )
+    )
+
+    rows = await db.scalars(
+        base_query.order_by(Dataset.created_at.desc()).limit(limit).offset(offset)
+    )
+    total = len((await db.execute(count_query)).all())
+    return DatasetListResponse(items=rows.all(), total=total, limit=limit, offset=offset)
+
+
+@router.get("/{map_id}/datasets/{dataset_id}/items/in-aoi", response_model=DatasetItemListResponse)
+async def list_map_dataset_items_in_aoi(
+    map_id: UUID,
+    dataset_id: UUID,
+    bbox: str = Query(..., description="minx,miny,maxx,maxy in EPSG:4326"),
+    limit: int = Depends(limit_param),
+    offset: int = Depends(offset_param),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    bbox_4326 = _parse_bbox(bbox)
+    service = MapService(db)
+    await service.get_map(map_id, organization_id=org_id)
+
+    dataset_ids = set(
+        (
+            await db.execute(
+                select(MapLayer.dataset_id).where(
+                    MapLayer.map_id == map_id,
+                    MapLayer.dataset_id.is_not(None),
+                )
+            )
+        ).scalars().all()
+    )
+    if dataset_id not in dataset_ids:
+        raise HTTPException(status_code=404, detail="Dataset not found on this map")
+
+    items = (
+        await db.execute(
+            select(DatasetItem).where(
+                DatasetItem.dataset_id == dataset_id,
+                DatasetItem.organization_id == org_id,
+                DatasetItem.is_active.is_(True),
+            )
+        )
+    ).scalars().all()
+    matched = [item for item in items if _geometry_intersects_bbox(item.geometry, bbox_4326)]
+    page = matched[offset : offset + limit]
+    return DatasetItemListResponse(items=page, total=len(matched), limit=limit, offset=offset)
+
+
+@router.get("/{map_id}/aoi/resources", response_model=MapAOIResourcesRead)
+async def list_map_aoi_resources(
+    map_id: UUID,
+    bbox: str = Query(..., description="minx,miny,maxx,maxy in EPSG:4326"),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    bbox_4326 = _parse_bbox(bbox)
+    service = MapService(db)
+    await service.get_map(map_id, organization_id=org_id)
+
+    dataset_ids = set(
+        (
+            await db.execute(
+                select(MapLayer.dataset_id).where(
+                    MapLayer.map_id == map_id,
+                    MapLayer.dataset_id.is_not(None),
+                )
+            )
+        ).scalars().all()
+    )
+    datasets = []
+    dataset_items = []
+    if dataset_ids:
+        datasets = (
+            await db.execute(
+                select(Dataset).where(
+                    Dataset.id.in_(dataset_ids),
+                    Dataset.organization_id == org_id,
+                    Dataset.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        all_items = (
+            await db.execute(
+                select(DatasetItem).where(
+                    DatasetItem.dataset_id.in_(dataset_ids),
+                    DatasetItem.organization_id == org_id,
+                    DatasetItem.is_active.is_(True),
+                )
+            )
+        ).scalars().all()
+        dataset_items = [item for item in all_items if _geometry_intersects_bbox(item.geometry, bbox_4326)]
+
+    mounted_set_ids = set(
+        (
+            await db.execute(
+                select(MapAnnotationSet.annotation_set_id).where(MapAnnotationSet.map_id == map_id)
+            )
+        ).scalars().all()
+    )
+    layer_set_ids = set(
+        (
+            await db.execute(
+                select(MapLayer.annotation_set_id).where(
+                    MapLayer.map_id == map_id,
+                    MapLayer.annotation_set_id.is_not(None),
+                )
+            )
+        ).scalars().all()
+    )
+    annotation_set_ids = mounted_set_ids | layer_set_ids
+
+    vector_annotation_sets: list[AnnotationSet] = []
+    raster_mask_annotation_sets: list[AnnotationSet] = []
+    if annotation_set_ids:
+        raster_candidates = (
+            await db.execute(
+                select(AnnotationSet).where(
+                    AnnotationSet.id.in_(annotation_set_ids),
+                    AnnotationSet.organization_id == org_id,
+                    AnnotationSet.deleted_at.is_(None),
+                    AnnotationSet.raster_config.is_not(None),
+                )
+            )
+        ).scalars().all()
+        raster_mask_annotation_sets = [
+            aset
+            for aset in raster_candidates
+            if _bbox_intersects((aset.raster_config or {}).get("bounds_4326") or [0, 0, 0, 0], bbox_4326)
+        ]
+
+        vector_set_ids = (
+            await db.execute(
+                select(distinct(Annotation.annotation_set_id))
+                .join(AnnotationSet, AnnotationSet.id == Annotation.annotation_set_id)
+                .where(
+                    Annotation.annotation_set_id.in_(annotation_set_ids),
+                    Annotation.deleted_at.is_(None),
+                    AnnotationSet.organization_id == org_id,
+                    func.ST_Intersects(
+                        Annotation.geometry,
+                        func.ST_MakeEnvelope(
+                            bbox_4326[0], bbox_4326[1], bbox_4326[2], bbox_4326[3], 4326
+                        ),
+                    ),
+                )
+            )
+        ).scalars().all()
+        if vector_set_ids:
+            vector_annotation_sets = (
+                await db.execute(
+                    select(AnnotationSet).where(
+                        AnnotationSet.id.in_(vector_set_ids),
+                        AnnotationSet.organization_id == org_id,
+                        AnnotationSet.deleted_at.is_(None),
+                    )
+                )
+            ).scalars().all()
+
+    return MapAOIResourcesRead(
+        bbox=bbox_4326,
+        datasets=datasets,
+        dataset_items=dataset_items,
+        vector_annotation_sets=vector_annotation_sets,
+        raster_mask_annotation_sets=raster_mask_annotation_sets,
+    )
+
+
+@router.get("/{map_id}/datasets/{dataset_id}/preview")
+async def preview_map_dataset_in_aoi(
+    map_id: UUID,
+    dataset_id: UUID,
+    bbox: str = Query(..., description="minx,miny,maxx,maxy in EPSG:4326"),
+    width: int = Query(default=512, ge=64, le=2048),
+    height: int = Query(default=512, ge=64, le=2048),
+    format: str = Query(default="png", pattern="^(png|jpeg|webp)$"),
+    assets: str | None = Query(default=None),
+    rescale: str | None = Query(default=None),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    bbox_4326 = _parse_bbox(bbox)
+    service = MapService(db)
+    await service.get_map(map_id, organization_id=org_id)
+
+    dataset = await db.scalar(
+        select(Dataset).join(MapLayer, MapLayer.dataset_id == Dataset.id).where(
+            Dataset.id == dataset_id,
+            Dataset.organization_id == org_id,
+            Dataset.deleted_at.is_(None),
+            MapLayer.map_id == map_id,
+        )
+    )
+    if dataset is None or not dataset.stac_collection_id:
+        raise HTTPException(status_code=404, detail="Dataset not found on this map")
+
+    try:
+        content = await titiler_service.get_collection_preview(
+            dataset.stac_collection_id,
+            assets=assets,
+            bbox=bbox_4326,
+            width=width,
+            height=height,
+            format=format,
+            rescale=rescale,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return Response(content=content, media_type=f"image/{format}")
+
+
+@router.get("/{map_id}/datasets/{dataset_id}/items/{item_id}/preview")
+async def preview_map_dataset_item_in_aoi(
+    map_id: UUID,
+    dataset_id: UUID,
+    item_id: UUID,
+    bbox: str = Query(..., description="minx,miny,maxx,maxy in EPSG:4326"),
+    width: int = Query(default=512, ge=64, le=2048),
+    height: int = Query(default=512, ge=64, le=2048),
+    format: str = Query(default="png", pattern="^(png|jpeg|webp)$"),
+    assets: str | None = Query(default=None),
+    rescale: str | None = Query(default=None),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    bbox_4326 = _parse_bbox(bbox)
+    service = MapService(db)
+    await service.get_map(map_id, organization_id=org_id)
+
+    dataset = await db.scalar(
+        select(Dataset).join(MapLayer, MapLayer.dataset_id == Dataset.id).where(
+            Dataset.id == dataset_id,
+            Dataset.organization_id == org_id,
+            Dataset.deleted_at.is_(None),
+            MapLayer.map_id == map_id,
+        )
+    )
+    item = await db.scalar(
+        select(DatasetItem).where(
+            DatasetItem.id == item_id,
+            DatasetItem.dataset_id == dataset_id,
+            DatasetItem.organization_id == org_id,
+            DatasetItem.is_active.is_(True),
+        )
+    )
+    if dataset is None or item is None:
+        raise HTTPException(status_code=404, detail="Dataset item not found on this map")
+
+    try:
+        content = await titiler_service.get_item_bbox_preview(
+            item.stac_collection_id,
+            item.stac_item_id,
+            bbox=bbox_4326,
+            width=width,
+            height=height,
+            format=format,
+            assets=assets,
+            rescale=rescale,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return Response(content=content, media_type=f"image/{format}")
+
+
+@router.post("/{map_id}/inference", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+async def create_map_inference_job(
+    map_id: UUID,
+    payload: MapInferenceCreate,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    service = MapService(db)
+    map_row = await service.get_map(map_id, organization_id=org_id)
+    inference_payload = payload.to_inference_job(map_id=map_id)
+    if inference_payload.project_id is None:
+        inference_payload.project_id = map_row.project_id
+    return await _create_inference_job(
+        inference_payload,
+        org_id=org_id,
+        db=db,
+        current_user=current_user,
     )

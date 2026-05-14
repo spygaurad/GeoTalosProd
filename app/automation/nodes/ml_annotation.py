@@ -43,6 +43,7 @@ def execute_select_model(session, config, input_data, **kwargs):
     inputs=[
         HandleDef(handle="items", type="dataset_items", label="Dataset Items"),
         HandleDef(handle="model", type="model", label="Model"),
+        HandleDef(handle="selection", type="map_selection", label="Map Selection", required=False),
     ],
     outputs=[HandleDef(handle="predictions", type="raw_predictions", label="Raw Predictions")],
     config_schema={
@@ -51,6 +52,14 @@ def execute_select_model(session, config, input_data, **kwargs):
             "confidence_threshold": {"type": "number", "title": "Min Confidence", "default": 0.5, "minimum": 0, "maximum": 1},
             "batch_size": {"type": "integer", "title": "Batch Size", "default": 100, "minimum": 1, "maximum": 10000},
             "device": {"type": "string", "title": "Device", "enum": ["auto", "cpu", "gpu"], "default": "auto"},
+            "aoi_bbox": {
+                "type": "array",
+                "title": "AOI Bounding Box",
+                "items": {"type": "number"},
+                "minItems": 4,
+                "maxItems": 4,
+                "description": "[minx, miny, maxx, maxy] in EPSG:4326. If it covers the item bounds, the full item is used.",
+            },
         },
     },
     icon="brain",
@@ -65,10 +74,15 @@ def execute_run_inference(session, config, input_data, **kwargs):
 
     items = input_data.get("items", [])
     model = input_data.get("model", {})
+    selection = input_data.get("selection", {})
     if not items:
         raise ValueError("No dataset items provided")
     if not model:
         raise ValueError("No model provided")
+
+    aoi_bbox = config.get("aoi_bbox")
+    if aoi_bbox is None and isinstance(selection, dict):
+        aoi_bbox = selection.get("aoi_bbox")
 
     job = Job(
         organization_id=uuid.UUID(kwargs["organization_id"]),
@@ -81,6 +95,7 @@ def execute_run_inference(session, config, input_data, **kwargs):
                 # model's own output_config JSONB.
                 "confidence_threshold": config.get("confidence_threshold", 0.5),
                 "batch_size": config.get("batch_size", 100),
+                "aoi_bbox": aoi_bbox,
             },
             "automation_run_id": kwargs.get("run_id"),
             "automation_step_id": kwargs.get("step_id"),

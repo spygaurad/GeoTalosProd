@@ -222,6 +222,9 @@ class ModelManager:
         georef_context: dict[str, Any],
         patch: dict[str, Any],
         patch_image_base64: str,
+        adapter,
+        adapter_config: dict[str, Any],
+        prompt_payload: dict[str, Any] | None,
     ) -> Any:
         output_config = model.output_config or {}
         if "mock_raw_output" in output_config:
@@ -241,10 +244,13 @@ class ModelManager:
             "patch": patch,
             "patch_image_format": "png",
             "patch_image_base64": patch_image_base64,
+            "prompt_payload": prompt_payload or {},
         }
         req_cfg = model.request_config or {}
         if isinstance(req_cfg.get("payload"), dict):
             body.update(req_cfg["payload"])
+        if adapter.request_enricher is not None:
+            body = adapter.request_enricher(body, body["prompt_payload"], adapter_config)
 
         headers = {"Content-Type": "application/json"}
         auth_cfg = model.auth_config or {}
@@ -298,6 +304,7 @@ class ModelManager:
         adapter_name = output_cfg.get("adapter", "platform_passthrough")
         adapter_config = output_cfg.get("adapter_config") or {}
         adapter = get_adapter(adapter_name)
+        prompt_payload = output_cfg.get("prompt_payload") or {}
 
         project_id = output_cfg.get("project_id")
         map_id = output_cfg.get("map_id")
@@ -417,6 +424,9 @@ class ModelManager:
                             georef_context=patch_context,
                             patch=patch,
                             patch_image_base64=patch_png_b64,
+                            adapter=adapter,
+                            adapter_config=adapter_config,
+                            prompt_payload=prompt_payload,
                         )
                         normalized = adapter.convert_fn(raw_output, adapter_config, patch_context)
                         predictions = normalized.get("predictions") or []

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import Field, model_validator
@@ -33,6 +34,7 @@ class InferenceJobCreate(ORMModel):
     map_id: UUID | None = None
     mount_on_map: bool = False
     aoi_bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    prompt_payload: dict[str, Any] | None = None
     patch_size_px: int | None = Field(default=None, ge=64, le=4096)
     stride_px: int | None = Field(default=None, ge=32, le=4096)
     max_patches_per_item: int | None = Field(default=None, ge=1, le=4096)

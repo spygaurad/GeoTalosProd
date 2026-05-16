@@ -79,6 +79,7 @@ async def _create_inference_job(
             "map_id": str(payload.map_id) if payload.map_id else None,
             "mount_on_map": payload.mount_on_map,
             "aoi_bbox": payload.aoi_bbox,
+            "prompt_payload": payload.prompt_payload or {},
         }
     )
     if payload.patch_size_px is not None:

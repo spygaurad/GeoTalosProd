@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.api.v1.endpoints.jobs import create_inference_job
+from app.automation.adapters.sam3_adapter import enrich_request
 from app.schemas.job import InferenceJobCreate
 from app.services.patch_service import PatchService
 
@@ -48,6 +49,18 @@ def test_inference_job_schema_accepts_aoi_bbox():
         aoi_bbox=[-10.0, -10.0, 10.0, 10.0],
     )
     assert payload.aoi_bbox == [-10.0, -10.0, 10.0, 10.0]
+
+
+def test_inference_job_schema_accepts_prompt_payload():
+    payload = InferenceJobCreate(
+        model_id=uuid4(),
+        dataset_item_ids=[uuid4()],
+        prompt_payload={"boxes": [[0, 0, 10, 10]], "text_prompts": ["tree canopy"]},
+    )
+    assert payload.prompt_payload == {
+        "boxes": [[0, 0, 10, 10]],
+        "text_prompts": ["tree canopy"],
+    }
 
 
 def test_inference_job_schema_rejects_invalid_aoi_bbox():
@@ -125,6 +138,7 @@ async def test_create_inference_job_includes_aoi_bbox_in_run_output_config(monke
         model_id=model.id,
         dataset_item_ids=[item.id],
         aoi_bbox=[-1.0, -1.0, 1.0, 1.0],
+        prompt_payload={"boxes": [[0, 0, 10, 10]]},
         patch_size_px=512,
     )
     job = await create_inference_job(
@@ -135,5 +149,17 @@ async def test_create_inference_job_includes_aoi_bbox_in_run_output_config(monke
     )
 
     assert job.config["run_output_config"]["aoi_bbox"] == [-1.0, -1.0, 1.0, 1.0]
+    assert job.config["run_output_config"]["prompt_payload"] == {"boxes": [[0, 0, 10, 10]]}
     assert job.config["run_output_config"]["patch_size_px"] == 512
     assert apply_async_mock
+
+
+def test_sam3_request_enricher_maps_prompt_keys():
+    body = {"patch_image_base64": "...", "prompt_payload": {"boxes": [[1, 2, 3, 4]], "free_text": "oak"}}
+    config = {"prompt_key_map": {"boxes": "box_prompts", "free_text": "text_prompt"}}
+
+    enriched = enrich_request(body, body["prompt_payload"], config)
+
+    assert enriched["prompt_payload"] == {"boxes": [[1, 2, 3, 4]], "free_text": "oak"}
+    assert enriched["box_prompts"] == [[1, 2, 3, 4]]
+    assert enriched["text_prompt"] == "oak"

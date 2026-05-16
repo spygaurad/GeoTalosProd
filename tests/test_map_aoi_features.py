@@ -38,6 +38,7 @@ def test_map_inference_create_to_inference_job():
         model_id=model_id,
         dataset_item_ids=[item_id],
         aoi_bbox=[-1.0, -1.0, 1.0, 1.0],
+        prompt_payload={"boxes": [[0, 0, 10, 10]]},
         mount_on_map=True,
     )
     job_payload = payload.to_inference_job(map_id=map_id)
@@ -45,6 +46,7 @@ def test_map_inference_create_to_inference_job():
     assert job_payload.dataset_item_ids == [item_id]
     assert job_payload.map_id == map_id
     assert job_payload.aoi_bbox == [-1.0, -1.0, 1.0, 1.0]
+    assert job_payload.prompt_payload == {"boxes": [[0, 0, 10, 10]]}
     assert job_payload.mount_on_map is True
 
 

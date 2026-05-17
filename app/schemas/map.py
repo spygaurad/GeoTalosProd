@@ -63,6 +63,8 @@ class MapAOIResourcesRead(ORMModel):
     bbox: list[float]
     datasets: list[DatasetRead] = Field(default_factory=list)
     dataset_items: list[DatasetItemRead] = Field(default_factory=list)
+    stac_collection_ids: list[str] = Field(default_factory=list)
+    stac_items: list[dict[str, Any]] = Field(default_factory=list)
     vector_annotation_sets: list[AnnotationSetRead] = Field(default_factory=list)
     raster_mask_annotation_sets: list[AnnotationSetRead] = Field(default_factory=list)
 

@@ -83,9 +83,16 @@ ADAPTER_REGISTRY: dict[str, OutputAdapter] = {
                 "bbox_field": {"type": "string", "default": "bbox"},
                 "default_label": {"type": "string", "default": "object"},
                 "min_score": {"type": "number", "default": 0.0},
+                "prompt_key_map": {
+                    "type": "object",
+                    "description": "Maps generic prompt_payload keys to the SAM3 request keys expected by the model endpoint.",
+                    "additionalProperties": {"type": "string"},
+                    "default": {},
+                },
             },
         },
         convert_fn=sam3_adapter.convert,
+        request_enricher=sam3_adapter.enrich_request,
     ),
 }
 

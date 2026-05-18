@@ -133,30 +133,26 @@ def test_search_map_aoi_resources_returns_selection_and_items():
     from app.models.map import Map
 
     map_id = uuid4()
+    org_id = uuid4()
     dataset_id = uuid4()
     item_id = uuid4()
     vector_set_id = uuid4()
     raster_set_id = uuid4()
     session = _FakeSession(
-        objects={(Map, map_id): SimpleNamespace(id=map_id)},
+        objects={
+            (Map, map_id): SimpleNamespace(
+                id=map_id,
+                project=SimpleNamespace(organization_id=org_id),
+            )
+        },
         execute_results=[
-            _ExecuteResult(scalars=[dataset_id]),
-            _ExecuteResult(
-                scalars=[
-                    SimpleNamespace(
-                        id=dataset_id,
-                        name="Dataset A",
-                        stac_collection_id="org-a",
-                        created_at=1,
-                    )
-                ]
-            ),
             _ExecuteResult(
                 scalars=[
                     SimpleNamespace(
                         id=item_id,
                         dataset_id=dataset_id,
                         stac_item_id="item-a",
+                        organization_id=org_id,
                         geometry={
                             "type": "Polygon",
                             "coordinates": [[[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]],
@@ -164,15 +160,14 @@ def test_search_map_aoi_resources_returns_selection_and_items():
                     )
                 ]
             ),
-            _ExecuteResult(scalars=[vector_set_id]),
-            _ExecuteResult(scalars=[raster_set_id]),
             _ExecuteResult(
                 scalars=[
-                    SimpleNamespace(
-                        id=raster_set_id,
-                        name="Mask 1",
-                        raster_config={"bounds_4326": [0, 0, 1, 1]},
-                    )
+                    SimpleNamespace(id=dataset_id, name="Dataset A", stac_collection_id="org-a", created_at=1)
+                ]
+            ),
+            _ExecuteResult(
+                scalars=[
+                    SimpleNamespace(id=raster_set_id, name="Mask 1", raster_config={"bounds_4326": [0, 0, 1, 1]})
                 ]
             ),
             _ExecuteResult(scalars=[vector_set_id]),
@@ -200,6 +195,55 @@ def test_search_map_aoi_resources_returns_selection_and_items():
     assert result["items"][0]["id"] == str(item_id)
 
 
+def test_search_map_aoi_resources_is_not_limited_to_map_layers():
+    from app.models.map import Map
+
+    map_id = uuid4()
+    org_id = uuid4()
+    dataset_id = uuid4()
+    session = _FakeSession(
+        objects={
+            (Map, map_id): SimpleNamespace(
+                id=map_id,
+                project=SimpleNamespace(organization_id=org_id),
+            )
+        },
+        execute_results=[
+            _ExecuteResult(
+                scalars=[
+                    SimpleNamespace(
+                        id=uuid4(),
+                        dataset_id=dataset_id,
+                        stac_item_id="item-stac-wide",
+                        organization_id=org_id,
+                        geometry={
+                            "type": "Polygon",
+                            "coordinates": [[[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]],
+                        },
+                    )
+                ]
+            ),
+            _ExecuteResult(
+                scalars=[
+                    SimpleNamespace(id=dataset_id, name="Global Dataset", stac_collection_id="org-global", created_at=1)
+                ]
+            ),
+            _ExecuteResult(scalars=[]),
+            _ExecuteResult(scalars=[]),
+            _ExecuteResult(scalars=[]),
+        ],
+    )
+
+    result = execute_search_map_aoi_resources(
+        session,
+        {"map_id": str(map_id), "aoi_bbox": [0, 0, 1, 1]},
+        {},
+    )
+
+    assert result["selection"]["dataset_ids"] == [str(dataset_id)]
+    assert result["selection"]["datasets"][0]["name"] == "Global Dataset"
+
+
 def test_run_inference_uses_aoi_from_map_selection(monkeypatch):
     delay_calls = []
 
@@ -214,7 +258,7 @@ def test_run_inference_uses_aoi_from_map_selection(monkeypatch):
     session = _FakeSession()
     result = execute_run_inference(
         session,
-        {"confidence_threshold": 0.7},
+        {"confidence_threshold": 0.7, "prompt_payload": {"boxes": [[0, 0, 10, 10]]}},
         {
             "items": [{"id": str(uuid4())}],
             "model": {"id": str(uuid4())},
@@ -228,6 +272,7 @@ def test_run_inference_uses_aoi_from_map_selection(monkeypatch):
     assert result.job_id
     assert delay_calls
     assert session.added[0].config["run_output_config"]["aoi_bbox"] == [1, 2, 3, 4]
+    assert session.added[0].config["run_output_config"]["prompt_payload"] == {"boxes": [[0, 0, 10, 10]]}
 
 
 def test_overlay_inference_outputs_on_map_mounts_all_sets():

@@ -24,7 +24,12 @@ def test_map_aoi_create_rejects_invalid_bbox():
 
 
 def test_map_aoi_inference_to_job_uses_scope_bbox():
-    payload = MapAOIInferenceCreate(model_id=uuid4(), scope="aoi", mount_on_map=True)
+    payload = MapAOIInferenceCreate(
+        model_id=uuid4(),
+        scope="aoi",
+        prompt_payload={"text_prompts": ["tree canopy"]},
+        mount_on_map=True,
+    )
     item_id = uuid4()
     map_id = uuid4()
     project_id = uuid4()
@@ -38,4 +43,5 @@ def test_map_aoi_inference_to_job_uses_scope_bbox():
     assert job_payload.map_id == map_id
     assert job_payload.project_id == project_id
     assert job_payload.aoi_bbox == [0.0, 0.0, 1.0, 1.0]
+    assert job_payload.prompt_payload == {"text_prompts": ["tree canopy"]}
     assert job_payload.mount_on_map is True

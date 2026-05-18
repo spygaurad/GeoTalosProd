@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import Field
@@ -62,6 +63,8 @@ class MapAOIResourcesRead(ORMModel):
     bbox: list[float]
     datasets: list[DatasetRead] = Field(default_factory=list)
     dataset_items: list[DatasetItemRead] = Field(default_factory=list)
+    stac_collection_ids: list[str] = Field(default_factory=list)
+    stac_items: list[dict[str, Any]] = Field(default_factory=list)
     vector_annotation_sets: list[AnnotationSetRead] = Field(default_factory=list)
     raster_mask_annotation_sets: list[AnnotationSetRead] = Field(default_factory=list)
 
@@ -69,6 +72,7 @@ class MapAOIResourcesRead(ORMModel):
 class MapInferenceCreate(ORMModel):
     dataset_item_ids: list[UUID] = Field(min_length=1)
     aoi_bbox: list[float] | None = None
+    prompt_payload: dict[str, Any] | None = None
     project_id: UUID | None = None
     mount_on_map: bool = False
     patch_size_px: int | None = Field(default=None, ge=64, le=4096)
@@ -84,6 +88,7 @@ class MapInferenceCreate(ORMModel):
             map_id=map_id,
             mount_on_map=self.mount_on_map,
             aoi_bbox=self.aoi_bbox,
+            prompt_payload=self.prompt_payload,
             patch_size_px=self.patch_size_px,
             stride_px=self.stride_px,
             max_patches_per_item=self.max_patches_per_item,

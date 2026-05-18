@@ -122,6 +122,7 @@ class MapAOIInferenceCreate(ORMModel):
     scope: str = Field(default="aoi", pattern="^(aoi|dataset)$")
     dataset_id: UUID | None = None
     dataset_item_ids: list[UUID] | None = None
+    prompt_payload: dict[str, Any] | None = None
     mount_on_map: bool = True
     patch_size_px: int | None = Field(default=None, ge=64, le=4096)
     stride_px: int | None = Field(default=None, ge=32, le=4096)
@@ -142,6 +143,7 @@ class MapAOIInferenceCreate(ORMModel):
             map_id=map_id,
             mount_on_map=self.mount_on_map,
             aoi_bbox=aoi_bbox,
+            prompt_payload=self.prompt_payload,
             patch_size_px=self.patch_size_px,
             stride_px=self.stride_px,
             max_patches_per_item=self.max_patches_per_item,

@@ -1,19 +1,20 @@
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from shapely.geometry import box, shape
-from sqlalchemy import distinct, func, select
+from sqlalchemy import distinct, false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_session, require_org_role
 from app.api.v1.endpoints.jobs import _create_inference_job
+from app.config import settings
 from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
 from app.models.annotation import Annotation
 from app.models.annotation_set import AnnotationSet
 from app.models.dataset import Dataset
 from app.models.dataset_item import DatasetItem
-from app.models.map_annotation_set import MapAnnotationSet
 from app.models.map_layer import MapLayer
 from app.models.user import User
 from app.schemas.dataset import DatasetListResponse
@@ -60,6 +61,17 @@ def _geometry_intersects_bbox(geometry: dict | None, bbox_4326: list[float]) -> 
         return shape(geometry).intersects(box(*bbox_4326))
     except Exception:
         return False
+
+
+async def _org_collection_ids(db: AsyncSession, org_id: UUID) -> set[str]:
+    result = await db.execute(
+        select(Dataset.stac_collection_id).where(
+            Dataset.organization_id == org_id,
+            Dataset.stac_collection_id.is_not(None),
+            Dataset.deleted_at.is_(None),
+        )
+    )
+    return {row for (row,) in result.all()}
 
 
 @router.get("", response_model=MapListResponse)
@@ -248,19 +260,49 @@ async def list_map_aoi_resources(
     bbox_4326 = _parse_bbox(bbox)
     service = MapService(db)
     await service.get_map(map_id, organization_id=org_id)
+    allowed_collections = await _org_collection_ids(db, org_id)
 
-    dataset_ids = set(
-        (
-            await db.execute(
-                select(MapLayer.dataset_id).where(
-                    MapLayer.map_id == map_id,
-                    MapLayer.dataset_id.is_not(None),
-                )
+    stac_features: list[dict] = []
+    stac_collection_ids: list[str] = []
+    if allowed_collections:
+        search_body = {
+            "collections": list(allowed_collections),
+            "bbox": bbox_4326,
+            "limit": 500,
+        }
+        async with httpx.AsyncClient(base_url=settings.STAC_API_URL, timeout=30.0) as client:
+            try:
+                resp = await client.post("/search", json=search_body)
+            except httpx.RequestError as exc:
+                raise HTTPException(status_code=503, detail="STAC service is unavailable") from exc
+        if resp.status_code >= 500:
+            raise HTTPException(status_code=502, detail="STAC service returned an error")
+        stac_body = resp.json()
+        stac_features = stac_body.get("features", []) or []
+        stac_collection_ids = sorted(
+            {
+                str(feature.get("collection"))
+                for feature in stac_features
+                if feature.get("collection")
+            }
+        )
+
+    local_items = (
+        await db.execute(
+            select(DatasetItem).where(
+                DatasetItem.organization_id == org_id,
+                DatasetItem.is_active.is_(True),
+                DatasetItem.stac_item_id.in_([feature.get("id") for feature in stac_features])
+                if stac_features
+                else false(),
             )
-        ).scalars().all()
-    )
+        )
+    ).scalars().all()
+    local_items_by_stac_id = {item.stac_item_id: item for item in local_items}
+    dataset_items = list(local_items_by_stac_id.values())
+    dataset_ids = {item.dataset_id for item in dataset_items}
+
     datasets = []
-    dataset_items = []
     if dataset_ids:
         datasets = (
             await db.execute(
@@ -271,87 +313,85 @@ async def list_map_aoi_resources(
                 )
             )
         ).scalars().all()
-        all_items = (
+    elif stac_collection_ids:
+        datasets = (
             await db.execute(
-                select(DatasetItem).where(
-                    DatasetItem.dataset_id.in_(dataset_ids),
-                    DatasetItem.organization_id == org_id,
-                    DatasetItem.is_active.is_(True),
+                select(Dataset).where(
+                    Dataset.organization_id == org_id,
+                    Dataset.deleted_at.is_(None),
+                    Dataset.stac_collection_id.in_(stac_collection_ids),
                 )
             )
         ).scalars().all()
-        dataset_items = [item for item in all_items if _geometry_intersects_bbox(item.geometry, bbox_4326)]
 
-    mounted_set_ids = set(
-        (
-            await db.execute(
-                select(MapAnnotationSet.annotation_set_id).where(MapAnnotationSet.map_id == map_id)
+    stac_items = []
+    for feature in stac_features:
+        stac_id = str(feature.get("id"))
+        local_item = local_items_by_stac_id.get(stac_id)
+        stac_items.append(
+            {
+                "id": stac_id,
+                "collection_id": feature.get("collection"),
+                "bbox": feature.get("bbox"),
+                "geometry": feature.get("geometry"),
+                "properties": feature.get("properties") or {},
+                "dataset_item_id": str(local_item.id) if local_item else None,
+                "dataset_id": str(local_item.dataset_id) if local_item else None,
+                "s3_uri": local_item.s3_uri if local_item else None,
+                "filename": local_item.filename if local_item else None,
+            }
+        )
+
+    raster_candidates = (
+        await db.execute(
+            select(AnnotationSet).where(
+                AnnotationSet.organization_id == org_id,
+                AnnotationSet.deleted_at.is_(None),
+                AnnotationSet.raster_config.is_not(None),
             )
-        ).scalars().all()
-    )
-    layer_set_ids = set(
-        (
-            await db.execute(
-                select(MapLayer.annotation_set_id).where(
-                    MapLayer.map_id == map_id,
-                    MapLayer.annotation_set_id.is_not(None),
-                )
-            )
-        ).scalars().all()
-    )
-    annotation_set_ids = mounted_set_ids | layer_set_ids
+        )
+    ).scalars().all()
+    raster_mask_annotation_sets = [
+        aset
+        for aset in raster_candidates
+        if _bbox_intersects((aset.raster_config or {}).get("bounds_4326") or [0, 0, 0, 0], bbox_4326)
+    ]
 
     vector_annotation_sets: list[AnnotationSet] = []
-    raster_mask_annotation_sets: list[AnnotationSet] = []
-    if annotation_set_ids:
-        raster_candidates = (
+    vector_set_ids = (
+        await db.execute(
+            select(distinct(Annotation.annotation_set_id))
+            .join(AnnotationSet, AnnotationSet.id == Annotation.annotation_set_id)
+            .where(
+                Annotation.deleted_at.is_(None),
+                AnnotationSet.organization_id == org_id,
+                AnnotationSet.deleted_at.is_(None),
+                func.ST_Intersects(
+                    Annotation.geometry,
+                    func.ST_MakeEnvelope(
+                        bbox_4326[0], bbox_4326[1], bbox_4326[2], bbox_4326[3], 4326
+                    ),
+                ),
+            )
+        )
+    ).scalars().all()
+    if vector_set_ids:
+        vector_annotation_sets = (
             await db.execute(
                 select(AnnotationSet).where(
-                    AnnotationSet.id.in_(annotation_set_ids),
+                    AnnotationSet.id.in_(vector_set_ids),
                     AnnotationSet.organization_id == org_id,
                     AnnotationSet.deleted_at.is_(None),
-                    AnnotationSet.raster_config.is_not(None),
                 )
             )
         ).scalars().all()
-        raster_mask_annotation_sets = [
-            aset
-            for aset in raster_candidates
-            if _bbox_intersects((aset.raster_config or {}).get("bounds_4326") or [0, 0, 0, 0], bbox_4326)
-        ]
-
-        vector_set_ids = (
-            await db.execute(
-                select(distinct(Annotation.annotation_set_id))
-                .join(AnnotationSet, AnnotationSet.id == Annotation.annotation_set_id)
-                .where(
-                    Annotation.annotation_set_id.in_(annotation_set_ids),
-                    Annotation.deleted_at.is_(None),
-                    AnnotationSet.organization_id == org_id,
-                    func.ST_Intersects(
-                        Annotation.geometry,
-                        func.ST_MakeEnvelope(
-                            bbox_4326[0], bbox_4326[1], bbox_4326[2], bbox_4326[3], 4326
-                        ),
-                    ),
-                )
-            )
-        ).scalars().all()
-        if vector_set_ids:
-            vector_annotation_sets = (
-                await db.execute(
-                    select(AnnotationSet).where(
-                        AnnotationSet.id.in_(vector_set_ids),
-                        AnnotationSet.organization_id == org_id,
-                        AnnotationSet.deleted_at.is_(None),
-                    )
-                )
-            ).scalars().all()
 
     return MapAOIResourcesRead(
         bbox=bbox_4326,
         datasets=datasets,
         dataset_items=dataset_items,
+        stac_collection_ids=stac_collection_ids,
+        stac_items=stac_items,
         vector_annotation_sets=vector_annotation_sets,
         raster_mask_annotation_sets=raster_mask_annotation_sets,
     )

@@ -128,3 +128,29 @@ def convert(raw: Any, config: dict[str, Any], context: dict[str, Any]) -> dict[s
         "predictions": preds,
         "metadata": {"adapter_used": "sam3_to_platform"},
     }
+
+
+def enrich_request(
+    body: dict[str, Any],
+    prompt_payload: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Map generic prompt_payload keys into SAM3-specific request keys.
+
+    The generic ``prompt_payload`` is still preserved verbatim in ``body``.
+    ``prompt_key_map`` lets the model owner define how frontend-sent keys
+    should be renamed for the concrete SAM3 endpoint contract.
+    """
+    prompt_key_map = config.get("prompt_key_map") or {}
+    if not isinstance(prompt_key_map, dict):
+        return body
+
+    for source_key, target_key in prompt_key_map.items():
+        if (
+            isinstance(source_key, str)
+            and isinstance(target_key, str)
+            and source_key in prompt_payload
+        ):
+            body[target_key] = prompt_payload[source_key]
+
+    return body

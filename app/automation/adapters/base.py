@@ -12,3 +12,6 @@ class OutputAdapter:
     supported_formats: list[str]
     config_schema: dict[str, Any]
     convert_fn: Callable[[Any, dict[str, Any], dict[str, Any]], dict[str, Any]]
+    request_enricher: (
+        Callable[[dict[str, Any], dict[str, Any], dict[str, Any]], dict[str, Any]] | None
+    ) = None

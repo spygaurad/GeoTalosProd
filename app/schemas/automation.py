@@ -122,6 +122,13 @@ class PipelineUpdate(BaseModel):
     graph: ReactFlowGraph | None = None
     status: PipelineStatus | None = None
 
+
+class PipelineDuplicateRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    target_project_id: UUID | None = None
+    target_map_id: UUID | None = None
+    target_aoi_id: UUID | None = None
+
 class PipelineRead(ORMModel):
     id: UUID
     organization_id: UUID

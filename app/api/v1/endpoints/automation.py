@@ -2,7 +2,7 @@
 from datetime import datetime, UTC
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,9 @@ from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
 from app.core.exceptions import not_found
 from app.models.automation import AutomationPipeline, AutomationRun, AutomationRunStep
+from app.models.map import Map
+from app.models.map_aoi import MapAOI
+from app.models.project import Project
 from app.models.user import User
 from app.schemas.automation import (
     GraphValidationResult,
@@ -19,6 +22,7 @@ from app.schemas.automation import (
     NodeTypeDef,
     HandleDef as HandleDefSchema,
     PipelineCreate,
+    PipelineDuplicateRequest,
     PipelineList,
     PipelineRead,
     PipelineSummary,
@@ -90,6 +94,27 @@ async def _get_run(session: AsyncSession, run_id: UUID, org_id: UUID) -> Automat
     if not run:
         raise not_found("Run")
     return run
+
+
+def _rewrite_graph_ids(graph: dict, *, target_project_id: UUID | None, target_map_id: UUID | None, target_aoi_id: UUID | None) -> dict:
+    def _rewrite(value):
+        if isinstance(value, dict):
+            updated = {}
+            for key, inner in value.items():
+                if key == "project_id" and target_project_id is not None:
+                    updated[key] = str(target_project_id)
+                elif key == "map_id" and target_map_id is not None:
+                    updated[key] = str(target_map_id)
+                elif key == "aoi_id" and target_aoi_id is not None:
+                    updated[key] = str(target_aoi_id)
+                else:
+                    updated[key] = _rewrite(inner)
+            return updated
+        if isinstance(value, list):
+            return [_rewrite(item) for item in value]
+        return value
+
+    return _rewrite(graph)
 
 
 # ── 3a. Node Catalog ──────────────────────────────────────────────────────
@@ -313,19 +338,87 @@ async def validate_pipeline(
 async def duplicate_pipeline(
     pipeline_id: UUID,
     name: str | None = Query(None),
+    body: PipelineDuplicateRequest | None = Body(default=None),
     org_id: UUID = Depends(require_org_role("org:member")),
     db: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
     source = await _get_pipeline(db, pipeline_id, org_id)
+    requested_name = body.name if body and body.name is not None else name
+
+    target_project_id = source.project_id
+    target_map_id: UUID | None = None
+    target_aoi_id: UUID | None = None
+
+    if body is not None:
+        if body.target_project_id is not None:
+            project = await db.scalar(
+                select(Project).where(
+                    Project.id == body.target_project_id,
+                    Project.organization_id == org_id,
+                    Project.deleted_at.is_(None),
+                )
+            )
+            if project is None:
+                raise HTTPException(status_code=404, detail="Target project not found")
+            target_project_id = project.id
+
+        if body.target_map_id is not None:
+            map_row = await db.scalar(
+                select(Map)
+                .join(Project, Project.id == Map.project_id)
+                .where(
+                    Map.id == body.target_map_id,
+                    Project.organization_id == org_id,
+                    Map.deleted_at.is_(None),
+                )
+            )
+            if map_row is None:
+                raise HTTPException(status_code=404, detail="Target map not found")
+            if target_project_id is not None and map_row.project_id != target_project_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Target map must belong to the target project",
+                )
+            target_project_id = map_row.project_id
+            target_map_id = map_row.id
+
+        if body.target_aoi_id is not None:
+            aoi = await db.scalar(
+                select(MapAOI)
+                .join(Map, Map.id == MapAOI.map_id)
+                .join(Project, Project.id == Map.project_id)
+                .where(
+                    MapAOI.id == body.target_aoi_id,
+                    Project.organization_id == org_id,
+                    MapAOI.deleted_at.is_(None),
+                    Map.deleted_at.is_(None),
+                )
+            )
+            if aoi is None:
+                raise HTTPException(status_code=404, detail="Target AOI not found")
+            if target_map_id is not None and aoi.map_id != target_map_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Target AOI must belong to the target map",
+                )
+            target_aoi_id = aoi.id
+
+    graph = _rewrite_graph_ids(
+        source.graph,
+        target_project_id=target_project_id,
+        target_map_id=target_map_id,
+        target_aoi_id=target_aoi_id,
+    )
+
     new_pipeline = AutomationPipeline(
         organization_id=org_id,
-        project_id=source.project_id,
-        name=name or f"Copy of {source.name}",
+        project_id=target_project_id,
+        name=requested_name or f"Copy of {source.name}",
         description=source.description,
         trigger_type=source.trigger_type,
         trigger_config=source.trigger_config,
-        graph=source.graph,
+        graph=graph,
         status="draft",
         node_count=source.node_count,
         created_by=user.id,
@@ -340,7 +433,12 @@ async def duplicate_pipeline(
         organization_id=str(org_id),
         entity="automation_pipeline",
         entity_id=str(new_pipeline.id),
-        extra={"source_pipeline_id": str(pipeline_id)},
+        extra={
+            "source_pipeline_id": str(pipeline_id),
+            "target_project_id": str(target_project_id) if target_project_id else None,
+            "target_map_id": str(target_map_id) if target_map_id else None,
+            "target_aoi_id": str(target_aoi_id) if target_aoi_id else None,
+        },
         session=db,
     )
     await db.commit()

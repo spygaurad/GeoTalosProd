@@ -80,6 +80,10 @@ class AnnotationSet(Base):
         back_populates="annotation_set",
         cascade="all, delete-orphan",
     )
+    collection_links: Mapped[list["AnnotationSetCollectionItem"]] = relationship(
+        "AnnotationSetCollectionItem",
+        cascade="all, delete-orphan",
+    )
     annotations: Mapped[list["Annotation"]] = relationship(
         "Annotation",
         back_populates="annotation_set",

@@ -4,6 +4,8 @@ from app.models.annotation import Annotation
 from app.models.annotation_class import AnnotationClass
 from app.models.annotation_schema import AnnotationSchema
 from app.models.annotation_set import AnnotationSet
+from app.models.annotation_set_collection import AnnotationSetCollection
+from app.models.annotation_set_collection_item import AnnotationSetCollectionItem
 from app.models.automation import AutomationPipeline, AutomationRun, AutomationRunStep
 from app.models.basemap import Basemap
 from app.models.dataset import Dataset
@@ -32,6 +34,8 @@ __all__ = [
     "AnnotationClass",
     "AnnotationSchema",
     "AnnotationSet",
+    "AnnotationSetCollection",
+    "AnnotationSetCollectionItem",
     "AutomationPipeline",
     "AutomationRun",
     "AutomationRunStep",

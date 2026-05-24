@@ -104,7 +104,7 @@ async def update_annotation(
 async def delete_annotation(
     set_id: UUID,
     annotation_id: UUID,
-    org_id: UUID = Depends(require_org_role("org:admin")),
+    org_id: UUID = Depends(require_org_role("org:member")),
     db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):

@@ -23,6 +23,8 @@ from app.models.job import Job
 from app.models.user import User
 from app.schemas.annotation_set import (
     AnnotationSetCreate,
+    AnnotationSetExportRequest,
+    AnnotationSetExportResponse,
     AnnotationSetListResponse,
     AnnotationSetLinkRequest,
     AnnotationSetMountListResponse,
@@ -48,6 +50,7 @@ _raster_preview_semaphore = asyncio.Semaphore(2)
 
 # 50 MB cap on inline GeoJSON imports.
 MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024
+EXPORT_PAGE_SIZE = 10_000
 
 
 # ── Router definitions ────────────────────────────────────────────────────────
@@ -300,6 +303,87 @@ async def get_annotation_set_features(
     return {"type": "FeatureCollection", "features": features, "total": total}
 
 
+@set_router.post("/export", response_model=AnnotationSetExportResponse)
+async def export_annotation_set(
+    set_id: UUID,
+    payload: AnnotationSetExportRequest,
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    annotation_set = await AnnotationSetService(db).get_set(set_id, organization_id=org_id)
+    ann_service = AnnotationService(db)
+
+    features: list[dict[str, Any]] = []
+    offset = 0
+    total = 0
+    while True:
+        items, total = await ann_service.list_annotations(
+            set_id=set_id,
+            limit=EXPORT_PAGE_SIZE,
+            offset=offset,
+            organization_id=org_id,
+        )
+        if not items:
+            break
+        for ann in items:
+            geom = serialize_geometry(ann.geometry)
+            if geom is None:
+                continue
+            features.append({
+                "type": "Feature",
+                "id": str(ann.id),
+                "geometry": geom,
+                "properties": {
+                    "class_id": str(ann.class_id),
+                    "confidence": ann.confidence,
+                    **(ann.properties or {}),
+                },
+            })
+        offset += len(items)
+        if offset >= total:
+            break
+
+    body = {
+        "type": "FeatureCollection",
+        "features": features,
+        "total": total,
+        "annotation_set_id": str(annotation_set.id),
+        "annotation_set_name": annotation_set.name,
+    }
+    body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    filename = f"annotation-set-{annotation_set.id}.geojson"
+    s3_key = f"exports/annotation-sets/{annotation_set.id}/{uuid4().hex}/{filename}"
+
+    def _upload_and_sign() -> str:
+        storage_service.ensure_org_bucket(org_id)
+        storage_service.upload_bytes(
+            org_id,
+            s3_key,
+            body_bytes,
+            content_type="application/geo+json",
+        )
+        return storage_service.generate_download_url(org_id, s3_key, payload.ttl_seconds)
+
+    try:
+        download_url = await asyncio.to_thread(_upload_and_sign)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not export annotation set: {exc}") from exc
+
+    await log_audit_event(
+        action="annotation_sets.export", actor_id=str(current_user.id),
+        organization_id=str(org_id), entity="annotation_set", entity_id=str(set_id), session=db,
+    )
+    return AnnotationSetExportResponse(
+        annotation_set_id=annotation_set.id,
+        format=payload.format,
+        filename=filename,
+        s3_key=s3_key,
+        download_url=download_url,
+        expires_in=payload.ttl_seconds,
+    )
+
+
 @set_router.get("/raster/values", response_model=RasterMaskValuesPreviewRead)
 async def preview_raster_mask_values(
     set_id: UUID,
@@ -450,10 +534,11 @@ async def import_annotations_from_geojson(
 
     def _upload() -> None:
         storage_service.ensure_org_bucket(org_id)
-        client = storage_service._s3_client()
-        client.put_object(
-            Bucket=storage_service.bucket_name(org_id),
-            Key=s3_key, Body=body_bytes, ContentType="application/geo+json",
+        storage_service.upload_bytes(
+            org_id,
+            s3_key,
+            body_bytes,
+            content_type="application/geo+json",
         )
 
     try:

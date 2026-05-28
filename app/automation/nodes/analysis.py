@@ -148,6 +148,63 @@ def execute_timeseries_analysis(session, config, input_data, **kwargs):
     }
 
 
+@node(
+    type="aggregate_model_runs",
+    category="analysis",
+    label="Aggregate Model Runs",
+    description="Accumulate outputs from multiple model runs into a single structured JSON summary.",
+    inputs=[HandleDef(handle="predictions", type="raw_predictions", label="Predictions", multiple=True)],
+    outputs=[HandleDef(handle="summary", type="quality_metrics", label="Run Summary")],
+    config_schema={},
+    icon="table",
+    color="#0EA5E9",
+)
+def execute_aggregate_model_runs(session, config, input_data, **kwargs):
+    from app.models.ai_model import AIModel
+    from app.models.job import Job
+
+    predictions = input_data.get("predictions", [])
+    if isinstance(predictions, dict):
+        predictions = [predictions]
+    predictions = [p for p in predictions if p]
+
+    model_runs = []
+    all_annotation_set_ids = []
+    total_processed = 0
+    total_failed = 0
+
+    for pred in predictions:
+        job_id = pred.get("job_id")
+        job = session.get(Job, uuid.UUID(job_id)) if job_id else None
+        model = session.get(AIModel, job.model_id) if job and job.model_id else None
+        annotation_set_ids = pred.get("annotation_set_ids") or []
+        all_annotation_set_ids.extend(annotation_set_ids)
+        processed_items = int(pred.get("processed_items") or 0)
+        failed_items = int(pred.get("failed_items") or 0)
+        total_processed += processed_items
+        total_failed += failed_items
+
+        model_runs.append({
+            "job_id": job_id,
+            "model_id": pred.get("model_id") or (str(job.model_id) if job and job.model_id else None),
+            "model_name": pred.get("model_name") or (model.name if model else None),
+            "annotation_set_ids": annotation_set_ids,
+            "processed_items": processed_items,
+            "failed_items": failed_items,
+        })
+
+    return {
+        "summary": {
+            "model_run_count": len(model_runs),
+            "model_runs": model_runs,
+            "annotation_set_ids": all_annotation_set_ids,
+            "total_annotation_set_count": len(all_annotation_set_ids),
+            "total_processed_items": total_processed,
+            "total_failed_items": total_failed,
+        }
+    }
+
+
 # ============================================================================
 # 3. ZONAL STATISTICS
 # ============================================================================

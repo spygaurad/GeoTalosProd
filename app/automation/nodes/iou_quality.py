@@ -3,42 +3,11 @@ import uuid
 from app.automation.registry import node, HandleDef
 
 
-@node(
-    type="ground_truth_comparison",
-    category="iou_quality",
-    label="Ground Truth Comparison",
-    description="Compare predictions against a ground truth annotation set using IoU.",
-    inputs=[
-        HandleDef(handle="predictions", type="annotation_set", label="Predictions"),
-        HandleDef(handle="ground_truth", type="annotation_set", label="Ground Truth"),
-    ],
-    outputs=[HandleDef(handle="matches", type="matched_pairs", label="Matched Pairs")],
-    config_schema={
-        "type": "object",
-        "properties": {
-            "iou_threshold": {"type": "number", "title": "IoU Threshold", "default": 0.5, "minimum": 0, "maximum": 1},
-            "match_labels": {"type": "boolean", "title": "Require Label Match", "default": True},
-        },
-    },
-    icon="git-compare",
-    color="#F59E0B",
-)
-def execute_ground_truth_comparison(session, config, input_data, **kwargs):
-    """Pairwise IoU comparison between prediction and ground truth annotation sets."""
-    from sqlalchemy import text
+def _compute_set_iou_summary(session, pred_set_id: str, gt_set_id: str, iou_threshold: float, match_labels: bool):
+    from sqlalchemy import func, select, text
 
-    pred_set = input_data.get("predictions", {})
-    gt_set = input_data.get("ground_truth", {})
-    pred_id = pred_set.get("id")
-    gt_id = gt_set.get("id")
+    from app.models.annotation import Annotation
 
-    if not pred_id or not gt_id:
-        return {"matches": {"pairs": [], "summary": {}}}
-
-    iou_threshold = config.get("iou_threshold", 0.5)
-    match_labels = config.get("match_labels", True)
-
-    # Compute pairwise IoU between prediction and ground truth geometries
     label_join = "AND p_cls.name = g_cls.name" if match_labels else ""
     query = text(f"""
         SELECT
@@ -66,11 +35,10 @@ def execute_ground_truth_comparison(session, config, input_data, **kwargs):
     """)
 
     rows = session.execute(query, {
-        "pred_set_id": uuid.UUID(pred_id),
-        "gt_set_id": uuid.UUID(gt_id),
+        "pred_set_id": uuid.UUID(pred_set_id),
+        "gt_set_id": uuid.UUID(gt_set_id),
     }).mappings().all()
 
-    # Greedy matching: each prediction and GT used at most once
     used_preds, used_gts = set(), set()
     pairs = []
     for r in rows:
@@ -87,33 +55,27 @@ def execute_ground_truth_comparison(session, config, input_data, **kwargs):
         used_gts.add(r["gt_id"])
 
     tp = sum(1 for p in pairs if p["iou"] >= iou_threshold)
-    fp = len(used_preds) - tp  # matched but below threshold (not really — unmatched preds)
-    # Count total predictions and GTs for precision/recall
-    from sqlalchemy import select, func
-    from app.models.annotation import Annotation
-
     total_preds = session.execute(
         select(func.count()).where(
-            Annotation.annotation_set_id == uuid.UUID(pred_id),
+            Annotation.annotation_set_id == uuid.UUID(pred_set_id),
             Annotation.deleted_at.is_(None),
         )
-    ).scalar()
+    ).scalar() or 0
     total_gts = session.execute(
         select(func.count()).where(
-            Annotation.annotation_set_id == uuid.UUID(gt_id),
+            Annotation.annotation_set_id == uuid.UUID(gt_set_id),
             Annotation.deleted_at.is_(None),
         )
-    ).scalar()
+    ).scalar() or 0
 
     fn = total_gts - len(used_gts)
     fp_total = total_preds - tp
-
     precision = tp / (tp + fp_total) if (tp + fp_total) > 0 else 0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    mean_iou = sum(p["iou"] for p in pairs) / len(pairs) if pairs else 0
 
-    return {"matches": {
-        "iou_threshold": iou_threshold,
+    return {
         "pairs": pairs,
         "summary": {
             "true_positives": tp,
@@ -122,8 +84,155 @@ def execute_ground_truth_comparison(session, config, input_data, **kwargs):
             "precision": round(precision, 4),
             "recall": round(recall, 4),
             "f1_score": round(f1, 4),
+            "mean_iou": round(mean_iou, 4),
+            "matched_pairs": len(pairs),
+            "prediction_count": int(total_preds),
+            "ground_truth_count": int(total_gts),
         },
-    }}
+    }
+
+
+@node(
+    type="ground_truth_comparison",
+    category="iou_quality",
+    label="Ground Truth Comparison",
+    description="Compare predictions against a ground truth annotation set using IoU.",
+    inputs=[
+        HandleDef(handle="predictions", type="annotation_set", label="Predictions"),
+        HandleDef(handle="ground_truth", type="annotation_set", label="Ground Truth"),
+    ],
+    outputs=[HandleDef(handle="matches", type="matched_pairs", label="Matched Pairs")],
+    config_schema={
+        "type": "object",
+        "properties": {
+            "iou_threshold": {"type": "number", "title": "IoU Threshold", "default": 0.5, "minimum": 0, "maximum": 1},
+            "match_labels": {"type": "boolean", "title": "Require Label Match", "default": True},
+        },
+    },
+    icon="git-compare",
+    color="#F59E0B",
+)
+def execute_ground_truth_comparison(session, config, input_data, **kwargs):
+    """Pairwise IoU comparison between prediction and ground truth annotation sets."""
+    pred_set = input_data.get("predictions", {})
+    gt_set = input_data.get("ground_truth", {})
+    pred_id = pred_set.get("id")
+    gt_id = gt_set.get("id")
+
+    if not pred_id or not gt_id:
+        return {"matches": {"pairs": [], "summary": {}}}
+
+    iou_threshold = config.get("iou_threshold", 0.5)
+    match_labels = config.get("match_labels", True)
+    result = _compute_set_iou_summary(session, pred_id, gt_id, iou_threshold, match_labels)
+    return {"matches": {"iou_threshold": iou_threshold, **result}}
+
+
+@node(
+    type="multi_model_iou_comparison",
+    category="iou_quality",
+    label="Multi-Model IoU Comparison",
+    description="Compare outputs from multiple model runs on the same dataset items and summarize pairwise IoU agreement.",
+    inputs=[HandleDef(handle="predictions", type="raw_predictions", label="Predictions", multiple=True)],
+    outputs=[HandleDef(handle="comparison", type="quality_metrics", label="Comparison Summary")],
+    config_schema={
+        "type": "object",
+        "properties": {
+            "iou_threshold": {"type": "number", "title": "IoU Threshold", "default": 0.5, "minimum": 0, "maximum": 1},
+            "match_labels": {"type": "boolean", "title": "Require Label Match", "default": True},
+        },
+    },
+    icon="git-compare",
+    color="#F59E0B",
+)
+def execute_multi_model_iou_comparison(session, config, input_data, **kwargs):
+    from sqlalchemy import select
+
+    from app.models.ai_model import AIModel
+    from app.models.annotation_set import AnnotationSet
+    from app.models.job import Job
+
+    predictions = input_data.get("predictions", [])
+    if isinstance(predictions, dict):
+        predictions = [predictions]
+    predictions = [p for p in predictions if p]
+    if len(predictions) < 2:
+        return {"comparison": {"model_runs": predictions, "pairwise_comparisons": [], "summary": {"comparison_count": 0}}}
+
+    iou_threshold = config.get("iou_threshold", 0.5)
+    match_labels = config.get("match_labels", True)
+
+    run_entries = []
+    for pred in predictions:
+        job_id = pred.get("job_id")
+        annotation_set_ids = pred.get("annotation_set_ids") or []
+        job = session.get(Job, uuid.UUID(job_id)) if job_id else None
+        model = session.get(AIModel, job.model_id) if job and job.model_id else None
+        rows = session.execute(
+            select(AnnotationSet.id, AnnotationSet.dataset_item_id)
+            .where(AnnotationSet.id.in_([uuid.UUID(sid) for sid in annotation_set_ids]))
+        ).all() if annotation_set_ids else []
+        by_item = {str(row.dataset_item_id): str(row.id) for row in rows if row.dataset_item_id is not None}
+        run_entries.append({
+            "job_id": job_id,
+            "model_id": pred.get("model_id") or (str(job.model_id) if job and job.model_id else None),
+            "model_name": pred.get("model_name") or (model.name if model else None),
+            "annotation_set_ids": annotation_set_ids,
+            "by_dataset_item": by_item,
+            "processed_items": pred.get("processed_items"),
+            "failed_items": pred.get("failed_items"),
+        })
+
+    pairwise = []
+    for idx, left in enumerate(run_entries):
+        for right in run_entries[idx + 1:]:
+            shared_item_ids = sorted(set(left["by_dataset_item"]).intersection(right["by_dataset_item"]))
+            item_comparisons = []
+            for dataset_item_id in shared_item_ids:
+                left_set_id = left["by_dataset_item"][dataset_item_id]
+                right_set_id = right["by_dataset_item"][dataset_item_id]
+                comp = _compute_set_iou_summary(
+                    session,
+                    left_set_id,
+                    right_set_id,
+                    iou_threshold,
+                    match_labels,
+                )
+                item_comparisons.append({
+                    "dataset_item_id": dataset_item_id,
+                    "left_annotation_set_id": left_set_id,
+                    "right_annotation_set_id": right_set_id,
+                    **comp["summary"],
+                })
+
+            mean_iou = (
+                round(sum(item["mean_iou"] for item in item_comparisons) / len(item_comparisons), 4)
+                if item_comparisons else 0
+            )
+            pairwise.append({
+                "left_model_id": left["model_id"],
+                "left_model_name": left["model_name"],
+                "left_job_id": left["job_id"],
+                "right_model_id": right["model_id"],
+                "right_model_name": right["model_name"],
+                "right_job_id": right["job_id"],
+                "shared_dataset_item_count": len(shared_item_ids),
+                "mean_iou": mean_iou,
+                "item_comparisons": item_comparisons,
+            })
+
+    return {
+        "comparison": {
+            "iou_threshold": iou_threshold,
+            "match_labels": match_labels,
+            "model_runs": run_entries,
+            "pairwise_comparisons": pairwise,
+            "summary": {
+                "model_run_count": len(run_entries),
+                "comparison_count": len(pairwise),
+            },
+        }
+    }
 
 
 @node(

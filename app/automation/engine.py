@@ -125,8 +125,10 @@ def validate_graph(graph: ReactFlowGraph) -> GraphValidationResult:
 
     # 4. Check required inputs have incoming edges
     incoming_edges = defaultdict(set)  # node_id -> set of target handle IDs
+    incoming_edge_counts = defaultdict(lambda: defaultdict(int))  # node_id -> handle -> count
     for edge in graph.edges:
         incoming_edges[edge.target].add(edge.targetHandle)
+        incoming_edge_counts[edge.target][edge.targetHandle] += 1
 
     for node in graph.nodes:
         node_type = get_node_type(_resolve_node_type(node))
@@ -138,6 +140,12 @@ def validate_graph(graph: ReactFlowGraph) -> GraphValidationResult:
                     node_id=node.id,
                     error_type="missing_input",
                     message=f"Required input '{inp.handle}' has no incoming edge",
+                ))
+            if not inp.multiple and incoming_edge_counts[node.id].get(inp.handle, 0) > 1:
+                errors.append(GraphValidationError(
+                    node_id=node.id,
+                    error_type="multiple_inputs_not_allowed",
+                    message=f"Input '{inp.handle}' does not accept multiple incoming edges",
                 ))
 
     # 5. Cycle detection (Kahn's algorithm)
@@ -263,12 +271,21 @@ def resolve_step_inputs(
     from its upstream completed steps, mapped through edges.
     """
     inputs: dict[str, Any] = {}
+    node_map = {n.id: n for n in graph.nodes}
+    target_node = node_map.get(node_id)
+    target_type = get_node_type(_resolve_node_type(target_node)) if target_node else None
+    multiple_handles = {
+        handle.handle for handle in (target_type.inputs if target_type else []) if handle.multiple
+    }
     for edge in get_upstream_edges(graph, node_id):
         upstream_step = completed_steps.get(edge.source)
         if upstream_step and upstream_step.output_data:
             value = upstream_step.output_data.get(edge.sourceHandle)
             if value is not None:
-                inputs[edge.targetHandle] = value
+                if edge.targetHandle in multiple_handles:
+                    inputs.setdefault(edge.targetHandle, []).append(value)
+                else:
+                    inputs[edge.targetHandle] = value
     return inputs
 
 

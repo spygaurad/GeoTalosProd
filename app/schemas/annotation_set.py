@@ -77,6 +77,20 @@ class AnnotationSetUpdate(ORMModel):
     description: str | None = None
 
 
+class AnnotationSetExportRequest(ORMModel):
+    format: str = Field(default="geojson", pattern=r"^geojson$")
+    ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+
+
+class AnnotationSetExportResponse(ORMModel):
+    annotation_set_id: UUID
+    format: str
+    filename: str
+    s3_key: str
+    download_url: str
+    expires_in: int
+
+
 class AnnotationSetRead(ORMModel):
     id: UUID
     organization_id: UUID

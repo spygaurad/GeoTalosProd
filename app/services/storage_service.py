@@ -186,6 +186,17 @@ def upload_from_path(org_id: uuid.UUID, s3_key: str, file_path: str, content_typ
         )
 
 
+def upload_bytes(org_id: uuid.UUID, s3_key: str, data: bytes, content_type: str) -> None:
+    """Upload an in-memory object as a single PUT."""
+    client = _s3_client()
+    client.put_object(
+        Bucket=bucket_name(org_id),
+        Key=s3_key,
+        Body=data,
+        ContentType=content_type,
+    )
+
+
 def generate_part_url(
     org_id: uuid.UUID,
     s3_key: str,

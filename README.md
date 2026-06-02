@@ -1,6 +1,7 @@
 # AwakeForest Platform
 
-AwakeForest is an AOI-first geospatial AI platform for discovering imagery and annotations, running model inference on selected spatial data, comparing outputs against other models or ground truth, and visualizing results directly on a map. It combines catalog search, map state, annotation management, async inference jobs, and graph-based automation in one backend system.
+AwakeForest is an AOI-first geospatial AI platform for automated landscape observation and spatial analysis. The platform supports user-provided data and heterogeneous remote-sensing models through a shared inference and annotation workflow, enabling monitoring, tracking, review, alerting, and downstream spatial analysis through an interactive map and graph-based automation system.
+ in one backend system.
 
 ## Why This Platform Exists
 
@@ -9,6 +10,7 @@ Most geospatial AI workflows are fragmented across separate systems for:
 - map visualization
 - model execution
 - annotation management
+- Temporal anaylsis
 - evaluation and benchmarking
 - repeated operational workflows
 
@@ -29,7 +31,7 @@ AwakeForest brings those pieces together around a single working unit: the **Are
 
 ## What Makes AwakeForest Different
 
-- **AOI is first-class**: the platform starts from a map area, not just a file or dataset ID.
+- **AOI-driven analysis**: users can upload data as files or register datasets normally, but the main workflow for discovery, inference, and analysis is centered around a selected area on the map rather than only a file or dataset ID.
 - **Model outputs become usable map objects**: inference does not stop at an API response; outputs are saved as annotation sets and can be mounted on the map.
 - **Model-agnostic inference**: adapters decouple the platform contract from any one model family.
 - **Automation is built into the backend**: the platform supports reproducible geospatial workflows, not just CRUD endpoints.
@@ -361,18 +363,6 @@ then:
 - `Aggregate Model Runs`
 - `Multi-Model IoU Comparison`
 
-### Scheduling Support
-
-Scheduled triggers are implemented in the backend.
-
-Current behavior:
-- pipelines with `trigger_type="schedule"` and `status="active"` are registered into Celery Beat
-- Celery Beat dispatches scheduled runs to the automation queue
-- scheduled pipelines are reloaded on Beat startup
-
-Current caveat:
-- scheduling should currently be treated as **UTC-based**, because per-user timezone handling is not yet fully polished in the scheduler path
-
 ## Local Development
 
 ### Prerequisites
@@ -473,57 +463,3 @@ Install dependencies and run:
 poetry install
 poetry run pytest
 ```
-
-Useful tests in the current suite include:
-- `/Users/mac/Documents/AWAKEFOREST_PROJECT_V2/AwakeForestProd/tests/test_inference_jobs.py`
-- `/Users/mac/Documents/AWAKEFOREST_PROJECT_V2/AwakeForestProd/tests/test_map_aoi_state.py`
-- `/Users/mac/Documents/AWAKEFOREST_PROJECT_V2/AwakeForestProd/tests/test_annotation_set_export.py`
-- `/Users/mac/Documents/AWAKEFOREST_PROJECT_V2/AwakeForestProd/tests/test_automation_model_comparison.py`
-- `/Users/mac/Documents/AWAKEFOREST_PROJECT_V2/AwakeForestProd/tests/integration_map_scenario.py`
-
-## Current Strengths
-
-The platform is strongest today as an integrated backend for:
-- AOI-driven geospatial discovery and inference
-- model-agnostic inference with adapters
-- annotation management and map overlay
-- saved AOI timeline workflows
-- model-vs-model and model-vs-ground-truth evaluation
-- reproducible automation pipelines for geospatial ML workflows
-
-## Current Limitations
-
-This repository is functional, but not every node in the automation catalog is equally mature.
-
-Important caveats:
-- several advanced automation nodes are still placeholders
-- some transformation/reporting/review nodes need hardening before being treated as production-ready
-- scheduling is currently safest to treat as UTC-based
-- raw STAC discovery is broader than local runnable `dataset_items`, so some raw catalog hits may need ingestion/local representation before downstream inference flows can use them
-- raster/COG transformation workflows are still a next-step area, not the strongest current path
-
-## Research and Demo Positioning
-
-The strongest current research/demo story is:
-- select an AOI
-- discover imagery and resources in that AOI
-- run multiple models on the same selected data
-- compare the model outputs against each other or against ground truth
-- aggregate the run outputs and metrics
-- visualize the results directly on the map
-
-This makes AwakeForest useful not only as an operational geospatial backend, but also as a reproducible environment for model benchmarking, spatial evaluation, and workflow automation.
-
-## Near-Term Roadmap
-
-Promising next steps for the platform include:
-- temporal change detection across multiple dates in the same AOI
-- consensus building and ensemble workflows from multiple model outputs
-- scheduled and event-triggered AOI monitoring
-- human-in-the-loop review workflows for uncertain predictions
-- annotation-set collection transformations such as merge, rasterize, and COG generation
-- richer automated reporting and benchmarking outputs
-
-## License
-
-Internal project. Add the project license here if and when distribution terms are finalized.

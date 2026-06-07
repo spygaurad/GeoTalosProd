@@ -1,8 +1,22 @@
 # GEOTALOS Platform
 
-GEOTALOS is an AOI-driven geospatial AI platform for discovering imagery, running models, reviewing annotations, and automating monitoring workflows through an interactive map and visual workflow builder.
+<p align="center">
+  <img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/spygaurad/AwakeForestProd">
+  <img alt="GitHub issues" src="https://img.shields.io/github/issues/spygaurad/AwakeForestProd">
+  <img alt="GitHub stars" src="https://img.shields.io/github/stars/spygaurad/AwakeForestProd?style=social">
+</p>
 
-[Documentation](docs/index.md) • [Workflows](docs/workflows.md) • [Setup](docs/setup.md) • [API](docs/links/api-docs-link.md)
+<p align="center">
+  GEOTALOS is an AOI-driven geospatial AI platform for discovering imagery, running models, reviewing annotations, and automating monitoring workflows through an interactive map and visual workflow builder.
+</p>
+
+<p align="center">
+  <a href="docs/index.md">📘 Documentation</a> •
+  <a href="docs/workflows.md">🧩 Workflows</a> •
+  <a href="docs/architecture.md">🏗️ Architecture</a> •
+  <a href="docs/setup.md">⚙️ Setup</a> •
+  <a href="docs/links/api-docs-link.md">🔌 API</a>
+</p>
 
 ## Why GEOTALOS
 

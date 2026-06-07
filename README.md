@@ -51,26 +51,28 @@
 
 ## How It Works
 
-1. **Define an area of interest**  
-   Draw or load an AOI on the map to focus the workflow on a specific study area.
+### 1. Discover
 
-2. **Discover relevant imagery and resources**  
-   Search for imagery, dataset items, and existing map resources that intersect the selected AOI.
+- **📍 Define an area of interest**  
+  Draw or load an AOI on the map to focus the workflow on a specific study area.
+- **🛰️ Discover relevant imagery and resources**  
+  Search for imagery, dataset items, and existing map resources that intersect the selected AOI.
+- **📦 Select data for analysis**  
+  Choose the scenes, datasets, or time-based imagery items you want to inspect or process.
 
-3. **Select data for analysis**  
-   Choose the scenes, datasets, or time-based imagery items you want to inspect or process.
+### 2. Analyze
 
-4. **Run one or more AI models**  
-   Send the selected imagery through registered models for detection, segmentation, or other spatial analysis tasks.
+- **🤖 Run one or more AI models**  
+  Send the selected imagery through registered models for detection, segmentation, or other spatial analysis tasks.
+- **🗺️ Convert outputs into map-ready annotations**  
+  GeoTALOS turns model outputs into geographic annotations that can be saved, compared, and visualized on the map.
 
-5. **Convert outputs into map-ready annotations**  
-   GeoTALOS turns model outputs into geographic annotations that can be saved, compared, and visualized on the map.
+### 3. Review and Reuse
 
-6. **Review and compare results**  
-   Inspect outputs on the map, compare multiple model runs or ground-truth annotations, and refine the results if needed.
-
-7. **Reuse the workflow**  
-   Save the AOI, annotation sets, and workflow setup so the same process can be repeated later or automated.
+- **✅ Review and compare results**  
+  Inspect outputs on the map, compare multiple model runs or ground-truth annotations, and refine the results if needed.
+- **♻️ Reuse the workflow**  
+  Save the AOI, annotation sets, and workflow setup so the same process can be repeated later or automated.
 
 ## Platform Overview
 

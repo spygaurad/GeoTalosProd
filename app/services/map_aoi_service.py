@@ -83,7 +83,9 @@ class MapAOIService:
         created_by: UUID | None,
     ) -> MapAOI:
         await self.get_map_for_org(map_id, organization_id)
-        data = payload.model_dump()
+        # mode='json' ensures UUID/datetime fields nested under selection_config /
+        # render_config become JSON-safe primitives before hitting the JSONB column.
+        data = payload.model_dump(mode="json")
         data["map_id"] = map_id
         data["organization_id"] = organization_id
         data["created_by"] = created_by
@@ -107,7 +109,9 @@ class MapAOIService:
         organization_id: UUID,
     ) -> MapAOI:
         aoi = await self.get_aoi(map_id, aoi_id, organization_id=organization_id)
-        for key, value in payload.model_dump(exclude_unset=True).items():
+        # mode='json' converts UUID/datetime fields inside selection_config /
+        # render_config to JSON-safe primitives so the JSONB column accepts them.
+        for key, value in payload.model_dump(exclude_unset=True, mode="json").items():
             setattr(aoi, key, value)
         try:
             await self.db.commit()

@@ -70,16 +70,18 @@ def execute_filter_annotations(session, config, input_data, **kwargs):
     type="merge_annotation_sets",
     category="data_operations",
     label="Merge Annotation Sets",
-    description="Combine multiple annotation sets into one.",
+    description=(
+        "Combine multiple annotation sets into one new set. The merged set "
+        "inherits the schema of its sources and is auto-grouped into that "
+        "schema's collection. To show it on a map, chain an Overlay on Map node."
+    ),
     inputs=[HandleDef(handle="sets", type="annotation_set", multiple=True)],
     outputs=[HandleDef(handle="merged", type="annotation_set")],
     config_schema={
         "type": "object",
         "properties": {
             "name": {"type": "string", "title": "Merged Set Name", "default": "Merged"},
-            "map_id": {"type": "string", "format": "uuid", "title": "Target Map", "x-picker": "map"},
         },
-        "required": ["map_id"],
     },
     icon="git-merge",
     color="#10B981",
@@ -98,13 +100,29 @@ def execute_merge_annotation_sets(session, config, input_data, **kwargs):
     if not set_ids:
         return {"merged": {}}
 
-    # Create a new merged annotation set
+    source_uuids = [uuid.UUID(sid) for sid in set_ids]
+    source_rows = session.execute(
+        select(AnnotationSet.id, AnnotationSet.schema_id).where(
+            AnnotationSet.id.in_(source_uuids)
+        )
+    ).all()
+    # Inherit a schema from the first source that has one, so the merged set can
+    # be auto-grouped into that schema's collection.
+    merged_schema_id = next((r.schema_id for r in source_rows if r.schema_id), None)
+
+    # Create a new merged annotation set under the run's organization (sourced
+    # server-side from the pipeline, never the frontend).
     merged = AnnotationSet(
-        map_id=uuid.UUID(config["map_id"]),
+        organization_id=uuid.UUID(kwargs["organization_id"]),
+        schema_id=merged_schema_id,
+        source_type="merge",
         name=config.get("name") or "Merged",
     )
     session.add(merged)
     session.flush()
+
+    from app.services.annotation_set_grouping import ensure_schema_collection_sync
+    ensure_schema_collection_sync(session, merged)
 
     # Copy annotations from all source sets into the new set
     session.execute(text("""

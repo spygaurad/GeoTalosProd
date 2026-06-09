@@ -106,6 +106,40 @@ class DatasetRead(ORMModel):
 DatasetListResponse = PaginatedResponse[DatasetRead]
 
 
+# ── Segmentation-mask class mapping schemas ───────────────────────────────────
+
+class DatasetRasterValuesRead(ORMModel):
+    """Unique pixel values read live from a segmentation-mask dataset's band,
+    for building the value→class mapping UI."""
+
+    dataset_id: UUID
+    dataset_item_id: UUID
+    band_index: int
+    values: list[float]
+    total_unique: int
+    truncated: bool
+
+
+class DatasetClassMapUpdate(ORMModel):
+    """Map raster pixel values to annotation classes so the mask overlay renders
+    with class colors. Colors themselves are derived client-side from the
+    classes' styles — only the value→class association is stored here."""
+
+    schema_id: UUID
+    # {pixel_value (as string) → annotation class UUID}
+    value_class_map: dict[str, UUID]
+    band_index: int = Field(default=1, ge=1)
+    nodata_value: float | None = None
+
+
+class DatasetClassMapRead(ORMModel):
+    dataset_id: UUID
+    schema_id: UUID
+    band_index: int
+    nodata_value: float | None
+    value_class_map: dict[str, UUID]
+
+
 # ── Upload sub-resource schemas ───────────────────────────────────────────────
 
 _ALLOWED_CONTENT_TYPES = {"image/tiff", "application/zip", "application/x-zip-compressed"}

@@ -8,16 +8,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_session, require_org_role
+from app.config import settings
 from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
-from app.core.enums import DatasetStatus, JobStatus, JobType
+from app.core.enums import DatasetStatus, DatasetType, JobStatus, JobType
 from app.core.exceptions import not_found
+from app.models.annotation_class import AnnotationClass
+from app.models.annotation_schema import AnnotationSchema
 from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.models.user import User
 from app.schemas.dataset import (
+    DatasetClassMapRead,
+    DatasetClassMapUpdate,
     DatasetCreate,
     DatasetListResponse,
+    DatasetRasterValuesRead,
     DatasetRead,
     DatasetUpdate,
     PartUrlsRequest,
@@ -32,8 +38,33 @@ from app.schemas.dataset_item import DatasetItemListResponse, DatasetItemTileCon
 from app.services.dataset_service import DatasetService
 from app.services import storage_service
 from app.services import titiler_service
+from app.workers.ingestion.rasterio_utils import extract_unique_values
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
+
+# Limit concurrent rasterio S3 reads to prevent thread pool exhaustion.
+_raster_preview_semaphore = asyncio.Semaphore(2)
+
+
+def _gdal_env_for_api() -> dict:
+    endpoint = settings.AWS_ENDPOINT_URL.replace("http://", "").replace("https://", "")
+    use_https = settings.AWS_ENDPOINT_URL.startswith("https://")
+    return {
+        "AWS_S3_ENDPOINT": endpoint,
+        "AWS_HTTPS": "YES" if use_https else "NO",
+        "AWS_VIRTUAL_HOSTING": "FALSE",
+        "AWS_REGION": settings.AWS_REGION,
+        "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+        "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff",
+        "GDAL_HTTP_TIMEOUT": "30",
+        "CPL_CURL_GZIP": "YES",
+    }
+
+
+def _normalize_value_key(value: object) -> str:
+    """Normalize a pixel value to a class-map key (integral → "5", else "5.5")."""
+    fv = float(str(value).strip())
+    return str(int(fv)) if fv.is_integer() else str(fv)
 
 # Part size used for multipart uploads: 50 MiB.
 # Larger parts = fewer round trips = faster uploads. MinIO / S3 minimum is
@@ -279,6 +310,162 @@ async def _build_item_tile_config(
         dataset_id=dataset_id,
         tile_url_template=tile_url_template,
         rendering_config=rendering_config,
+    )
+
+
+# ── Segmentation-mask class mapping ───────────────────────────────────────────
+
+
+@router.get("/{dataset_id}/raster-values", response_model=DatasetRasterValuesRead)
+async def get_dataset_raster_values(
+    dataset_id: UUID,
+    band_index: int = Query(default=1, ge=1),
+    max_values: int = Query(default=256, ge=1, le=2048),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+):
+    """Read the unique pixel values of a segmentation mask live from the raster.
+
+    Mirrors the annotation-set raster-mask preview — the value→class mapping UI
+    calls this to list the class IDs present in the mask.
+    """
+    service = DatasetService(db)
+    await service.get_dataset(dataset_id, organization_id=org_id)
+
+    item = (
+        await db.execute(
+            select(DatasetItem)
+            .where(
+                DatasetItem.dataset_id == dataset_id,
+                DatasetItem.is_active.is_(True),
+            )
+            .order_by(DatasetItem.created_at)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Dataset has no items")
+
+    try:
+        async with _raster_preview_semaphore:
+            preview = await asyncio.to_thread(
+                extract_unique_values, item.s3_uri, _gdal_env_for_api(),
+                band_index=band_index, max_values=max_values,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MemoryError:
+        raise HTTPException(status_code=507, detail="Raster too large to preview")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not read raster values: {exc}") from exc
+
+    return DatasetRasterValuesRead(
+        dataset_id=dataset_id,
+        dataset_item_id=item.id,
+        band_index=band_index,
+        values=preview["values"],
+        total_unique=preview["total_unique"],
+        truncated=preview["truncated"],
+    )
+
+
+@router.patch("/{dataset_id}/class-map", response_model=DatasetClassMapRead)
+async def set_dataset_class_map(
+    dataset_id: UUID,
+    payload: DatasetClassMapUpdate,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Associate segmentation-mask pixel values with annotation classes.
+
+    Stores ``{schema_id, value_class_map}`` inside the dataset's
+    ``rendering_config`` (and each item's). No colors are stored — the frontend
+    derives the overlay colormap from the classes' styles at render time, so the
+    overlay self-heals when a class color changes.
+    """
+    service = DatasetService(db)
+    dataset = await service.get_dataset(dataset_id, organization_id=org_id)
+
+    if dataset.dataset_type != DatasetType.SEGMENTATION_MASK.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Class mapping is only valid for segmentation_mask datasets",
+        )
+
+    # Schema must exist and belong to the org.
+    schema_exists = await db.execute(
+        select(AnnotationSchema.id).where(
+            AnnotationSchema.id == payload.schema_id,
+            AnnotationSchema.organization_id == org_id,
+            AnnotationSchema.deleted_at.is_(None),
+        )
+    )
+    if schema_exists.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Annotation schema not found")
+
+    # Every mapped class must belong to the schema.
+    class_ids = {UUID(str(v)) for v in payload.value_class_map.values()}
+    if class_ids:
+        rows = await db.execute(
+            select(AnnotationClass.id).where(
+                AnnotationClass.schema_id == payload.schema_id,
+                AnnotationClass.id.in_(class_ids),
+            )
+        )
+        if len(set(rows.scalars().all())) != len(class_ids):
+            raise HTTPException(
+                status_code=400,
+                detail="One or more class IDs do not belong to the selected schema",
+            )
+
+    value_class_map = {
+        _normalize_value_key(k): str(v) for k, v in payload.value_class_map.items()
+    }
+    class_map = {
+        "schema_id": str(payload.schema_id),
+        "band_index": payload.band_index,
+        "nodata_value": payload.nodata_value,
+        "value_class_map": value_class_map,
+    }
+
+    # Persist into the dataset's rendering_config and every active item's.
+    # Reassign the JSONB dicts so SQLAlchemy detects the change.
+    meta = dict(dataset.metadata_ or {})
+    rc = dict(meta.get("rendering_config") or {})
+    rc["class_map"] = class_map
+    meta["rendering_config"] = rc
+    dataset.metadata_ = meta
+
+    items = (
+        await db.execute(
+            select(DatasetItem).where(
+                DatasetItem.dataset_id == dataset_id,
+                DatasetItem.is_active.is_(True),
+            )
+        )
+    ).scalars().all()
+    for item in items:
+        props = dict(item.properties_cache or {})
+        item_rc = dict(props.get("rendering_config") or {})
+        item_rc["class_map"] = class_map
+        props["rendering_config"] = item_rc
+        item.properties_cache = props
+
+    await db.commit()
+
+    await log_audit_event(
+        action="datasets.class_map.update", actor_id=str(current_user.id),
+        organization_id=str(org_id), entity="dataset", entity_id=str(dataset_id), session=db,
+    )
+
+    return DatasetClassMapRead(
+        dataset_id=dataset_id,
+        schema_id=payload.schema_id,
+        band_index=payload.band_index,
+        nodata_value=payload.nodata_value,
+        value_class_map={k: UUID(v) for k, v in value_class_map.items()},
     )
 
 

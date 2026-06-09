@@ -133,7 +133,7 @@ def execute_ground_truth_comparison(session, config, input_data, **kwargs):
     category="iou_quality",
     label="Multi-Model IoU Comparison",
     description="Compare outputs from multiple model runs on the same dataset items and summarize pairwise IoU agreement.",
-    inputs=[HandleDef(handle="predictions", type="raw_predictions", label="Predictions", multiple=True)],
+    inputs=[HandleDef(handle="annotation_sets", type="annotation_set", label="Annotation Sets", multiple=True)],
     outputs=[HandleDef(handle="comparison", type="quality_metrics", label="Comparison Summary")],
     config_schema={
         "type": "object",
@@ -152,7 +152,7 @@ def execute_multi_model_iou_comparison(session, config, input_data, **kwargs):
     from app.models.annotation_set import AnnotationSet
     from app.models.job import Job
 
-    predictions = input_data.get("predictions", [])
+    predictions = input_data.get("annotation_sets", [])
     if isinstance(predictions, dict):
         predictions = [predictions]
     predictions = [p for p in predictions if p]
@@ -520,4 +520,151 @@ def execute_duplicate_detection(session, config, input_data, **kwargs):
     return {
         "unique": {**aset, "annotation_ids": unique_ids, "count": len(unique_ids)},
         "duplicates": {**aset, "annotation_ids": list(duplicate_ids), "count": len(duplicate_ids)},
+    }
+
+
+def _gdal_env_for_node():
+    """rasterio Env options for reading COGs from object store inside a node."""
+    from app.config import settings
+
+    endpoint = settings.AWS_ENDPOINT_URL.replace("http://", "").replace("https://", "")
+    return {
+        "AWS_S3_ENDPOINT": endpoint,
+        "AWS_HTTPS": "YES" if settings.AWS_ENDPOINT_URL.startswith("https://") else "NO",
+        "AWS_VIRTUAL_HOSTING": "FALSE",
+        "AWS_REGION": settings.AWS_REGION,
+        "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+        "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff",
+    }
+
+
+def _load_mask_dataset(session, dataset_id: str, organization_id: str | None):
+    """Resolve a segmentation-mask dataset to ``(s3_uri, class_map)``.
+
+    Reads the dataset's ``rendering_config.class_map`` (set when the mask was
+    ingested / class-mapped) and the first active item's COG uri.
+    """
+    from sqlalchemy import select
+
+    from app.models.dataset import Dataset
+    from app.models.dataset_item import DatasetItem
+
+    dataset = session.get(Dataset, uuid.UUID(str(dataset_id)))
+    if dataset is None:
+        raise ValueError(f"Dataset {dataset_id} not found")
+    if organization_id and str(dataset.organization_id) != str(organization_id):
+        raise ValueError("Dataset does not belong to this organization")
+
+    class_map = ((dataset.metadata_ or {}).get("rendering_config") or {}).get("class_map")
+    if not class_map or not class_map.get("value_class_map"):
+        raise ValueError(
+            f"Dataset '{dataset.name}' has no class map. Map its pixel values to "
+            "classes (or generate it with Rasterize Annotation Set) before comparing."
+        )
+
+    item = session.execute(
+        select(DatasetItem)
+        .where(DatasetItem.dataset_id == dataset.id, DatasetItem.is_active.is_(True))
+        .limit(1)
+    ).scalar_one_or_none()
+    if item is None:
+        raise ValueError(f"Dataset '{dataset.name}' has no active raster item")
+
+    return item.s3_uri, class_map, dataset.name
+
+
+def _class_names_for_maps(session, *class_maps) -> dict:
+    """Build ``{class_id: name}`` for every class id referenced by the maps."""
+    from sqlalchemy import select
+
+    from app.models.annotation_class import AnnotationClass
+
+    ids = set()
+    for cm in class_maps:
+        for cid in (cm or {}).get("value_class_map", {}).values():
+            ids.add(str(cid))
+    if not ids:
+        return {}
+    rows = session.execute(
+        select(AnnotationClass.id, AnnotationClass.name).where(
+            AnnotationClass.id.in_([uuid.UUID(c) for c in ids])
+        )
+    ).all()
+    return {str(cid): name for cid, name in rows}
+
+
+@node(
+    type="raster_mask_metrics",
+    category="iou_quality",
+    label="Raster Mask Metrics",
+    description=(
+        "Compare a model-output mask (wired in from a previous node, e.g. "
+        "Rasterize Annotation Set) against a ground-truth mask dataset, in the "
+        "raster domain. The smaller-extent mask sets the evaluation grid; the "
+        "larger is resampled onto it, so metrics cover only the overlap. Reports "
+        "per-class IoU / precision / recall / F1 plus overall pixel accuracy and "
+        "mean IoU."
+    ),
+    inputs=[HandleDef(handle="model_output", type="dataset", label="Model Output Mask")],
+    outputs=[HandleDef(handle="metrics", type="quality_metrics", label="Metrics")],
+    config_schema={
+        "type": "object",
+        "properties": {
+            "ground_truth_dataset_id": {
+                "type": "string",
+                "format": "uuid",
+                "title": "Ground Truth Dataset",
+                "x-picker": "dataset",
+                "description": "Pre-existing segmentation-mask dataset used as ground truth.",
+            },
+        },
+        "required": ["ground_truth_dataset_id"],
+    },
+    icon="ruler",
+    color="#F59E0B",
+)
+def execute_raster_mask_metrics(session, config, input_data, **kwargs):
+    """Per-class raster metrics between an upstream model mask and a GT dataset.
+
+    The model-output dataset arrives on the ``model_output`` input handle (the
+    ``dataset`` produced by an upstream node such as Rasterize Annotation Set);
+    the ground truth is a pre-existing dataset chosen in config.
+    """
+    from app.services.conversion import compare_raster_masks
+
+    pred_payload = input_data.get("model_output")
+    if isinstance(pred_payload, list):
+        pred_payload = pred_payload[0] if pred_payload else None
+    pred_id = pred_payload.get("id") if isinstance(pred_payload, dict) else None
+    gt_id = config.get("ground_truth_dataset_id")
+    if not pred_id:
+        raise ValueError("No model-output dataset on the input — wire a dataset-producing node in")
+    if not gt_id:
+        raise ValueError("ground_truth_dataset_id is required")
+    if str(gt_id) == str(pred_id):
+        raise ValueError("Ground truth and model output must be different datasets")
+
+    org_id = kwargs.get("organization_id")
+    gt_uri, gt_class_map, gt_name = _load_mask_dataset(session, gt_id, org_id)
+    pred_uri, pred_class_map, pred_name = _load_mask_dataset(session, pred_id, org_id)
+    class_names = _class_names_for_maps(session, gt_class_map, pred_class_map)
+
+    result = compare_raster_masks(
+        gt_uri,
+        pred_uri,
+        _gdal_env_for_node(),
+        gt_class_map=gt_class_map,
+        pred_class_map=pred_class_map,
+        class_names=class_names,
+    )
+
+    return {
+        "metrics": {
+            "type": "raster_mask_metrics",
+            "ground_truth": {"dataset_id": str(gt_id), "name": gt_name},
+            "prediction": {"dataset_id": str(pred_id), "name": pred_name},
+            "per_class": result.per_class,
+            "overall": result.overall,
+            "grid": result.grid,
+        }
     }

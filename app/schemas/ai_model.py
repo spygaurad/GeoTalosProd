@@ -7,7 +7,6 @@ from app.schemas.common import ORMModel, PaginatedResponse
 
 
 class AIModelCreate(ORMModel):
-    organization_id: UUID
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
     framework: str | None = None
@@ -18,7 +17,9 @@ class AIModelCreate(ORMModel):
     auth_config: dict | None = None
     input_schema: dict | None = None
     output_schema: dict | None = None
+    output_config: dict | None = None
     config: dict | None = None
+    annotation_schema_id: UUID | None = None
     created_by: UUID | None = None
 
 
@@ -33,7 +34,9 @@ class AIModelUpdate(ORMModel):
     auth_config: dict | None = None
     input_schema: dict | None = None
     output_schema: dict | None = None
+    output_config: dict | None = None
     config: dict | None = None
+    annotation_schema_id: UUID | None = None
 
 
 class AIModelRead(ORMModel):
@@ -50,7 +53,9 @@ class AIModelRead(ORMModel):
     auth_config: dict | None = Field(default=None, exclude=True)
     input_schema: dict | None
     output_schema: dict | None
+    output_config: dict | None
     config: dict | None
+    annotation_schema_id: UUID | None
     created_by: UUID | None
     created_at: datetime
     updated_at: datetime

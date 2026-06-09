@@ -62,13 +62,6 @@ SPECTRAL_PRESETS: dict[str, dict] = {
         "bands": ["nir", "red", "green"],
         "label": "False Color (Vegetation)",
     },
-    "ndvi": {
-        "requires": ["nir", "red"],
-        "expression_tpl": "(b{nir}-b{red})/(b{nir}+b{red})",
-        "colormap": "rdylgn",
-        "rescale": "-1,1",
-        "label": "NDVI (Vegetation Index)",
-    },
     "swir_composite": {
         "requires": ["swir16", "nir", "red"],
         "bands": ["swir16", "nir", "red"],
@@ -78,13 +71,6 @@ SPECTRAL_PRESETS: dict[str, dict] = {
         "requires": ["swir16", "nir", "blue"],
         "bands": ["swir16", "nir", "blue"],
         "label": "Agriculture",
-    },
-    "moisture": {
-        "requires": ["nir", "swir16"],
-        "expression_tpl": "(b{nir}-b{swir16})/(b{nir}+b{swir16})",
-        "colormap": "blues_r",
-        "rescale": "-1,1",
-        "label": "Moisture Index",
     },
     "urban": {
         "requires": ["swir22", "swir16", "red"],
@@ -97,6 +83,17 @@ SPECTRAL_PRESETS: dict[str, dict] = {
         "label": "Color Infrared (CIR)",
     },
 }
+
+# Qualitative palette for segmentation-mask class colors (tab20-style).
+# Distinct, high-contrast hues so adjacent class IDs are easy to tell apart.
+# Cycled when a mask has more classes than palette entries.
+SEGMENTATION_PALETTE: list[tuple[int, int, int]] = [
+    (31, 119, 180), (255, 127, 14), (44, 160, 44), (214, 39, 40),
+    (148, 103, 189), (140, 86, 75), (227, 119, 194), (127, 127, 127),
+    (188, 189, 34), (23, 190, 207), (174, 199, 232), (255, 187, 120),
+    (152, 223, 138), (255, 152, 150), (197, 176, 213), (196, 156, 148),
+    (247, 182, 210), (199, 199, 199), (219, 219, 141), (158, 218, 229),
+]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -530,20 +527,7 @@ def _detect_presets(
             if preset_id in presets:
                 continue  # already added (e.g. natural_color for RGB)
 
-            if "expression_tpl" in preset_def:
-                # Index expression — titiler needs asset_as_band=True
-                expr_map = {name: spectral_map[name] for name in required}
-                expression = preset_def["expression_tpl"].format(**expr_map)
-                p: dict[str, str] = {
-                    "expression": expression,
-                    "asset_as_band": "True",
-                }
-                if "colormap" in preset_def:
-                    p["colormap_name"] = preset_def["colormap"]
-                if "rescale" in preset_def:
-                    p["rescale"] = preset_def["rescale"]
-                presets[preset_id] = {"label": preset_def["label"], "params": p}
-            elif "bands" in preset_def:
+            if "bands" in preset_def:
                 # Band composite
                 bidx = [spectral_map[name] for name in preset_def["bands"]]
                 bidx_str = ",".join(str(b) for b in bidx)
@@ -562,11 +546,89 @@ def _detect_presets(
     return default_preset, presets
 
 
-def _extract_rendering_config(src: object, asset_name: str = "data") -> dict:
+def _detect_segmentation_presets(
+    src: object,
+    asset_name: str,
+    nodata: object,
+) -> tuple[str, dict[str, dict], list[int]]:
+    """Build rendering presets for a segmentation mask.
+
+    Reads the unique pixel values from band 1 (decimated) and assigns each
+    class ID a distinct colour, producing a discrete titiler ``colormap`` param
+    (value→RGBA JSON). Value 0 is treated as background and rendered
+    transparent. Raises on failure so the caller can fall back to grayscale.
+
+    Returns ``(default_preset, presets, class_values)`` where ``class_values``
+    is the sorted list of unique pixel values (the candidate class IDs) so the
+    frontend can offer a value→class mapping UI without re-reading the raster.
+    """
+    import json
+    import numpy as np
+
+    width = max(1, src.width)   # type: ignore[attr-defined]
+    height = max(1, src.height) # type: ignore[attr-defined]
+    max_pixels = 512 * 512
+    total_pixels = width * height
+    if total_pixels <= max_pixels:
+        out_width, out_height = width, height
+    else:
+        scale = (max_pixels / float(total_pixels)) ** 0.5
+        out_width = max(1, int(width * scale))
+        out_height = max(1, int(height * scale))
+
+    data = src.read(1, out_shape=(out_height, out_width))  # type: ignore[attr-defined]
+    arr = np.asarray(data).reshape(-1)
+    if nodata is not None:
+        arr = arr[arr != nodata]
+    if np.issubdtype(arr.dtype, np.floating):
+        arr = arr[~np.isnan(arr)]
+
+    uniques = np.unique(arr)
+    # Cap to a sane number of classes for the colormap param.
+    uniques = uniques[:256]
+    class_values = [int(round(v)) for v in uniques.tolist()]
+
+    colormap: dict[str, list[int]] = {}
+    palette_idx = 0
+    for iv in class_values:
+        key = str(iv)
+        if iv == 0:
+            # Background / no-class → fully transparent.
+            colormap[key] = [0, 0, 0, 0]
+        else:
+            r, g, b = SEGMENTATION_PALETTE[palette_idx % len(SEGMENTATION_PALETTE)]
+            palette_idx += 1
+            colormap[key] = [r, g, b, 255]
+
+    if not colormap:
+        raise ValueError("segmentation mask has no class values")
+
+    cmap_str = json.dumps(colormap, separators=(",", ":"))
+    class_params: dict[str, str] = {
+        "asset_bidx": f"{asset_name}|1",
+        "colormap": cmap_str,
+    }
+    presets: dict[str, dict] = {
+        "classes": {"label": "Class Colors", "params": class_params},
+        "grayscale": {
+            "label": "Grayscale",
+            "params": {"asset_bidx": f"{asset_name}|1", "colormap_name": "gray"},
+        },
+    }
+    return "classes", presets, class_values
+
+
+def _extract_rendering_config(
+    src: object, asset_name: str = "data", dataset_type: str = "imagery",
+) -> dict:
     """Extract full rendering configuration from an open rasterio dataset.
 
     Called inside extract_cog_metadata() while the file is already open.
     Returns a rendering_config dict ready for JSONB storage.
+
+    When *dataset_type* is ``"segmentation_mask"``, the band is treated as a
+    categorical class raster: a discrete value→colour colormap is built instead
+    of the grayscale ramp used for single-band imagery.
     """
     from rasterio.enums import ColorInterp
 
@@ -616,8 +678,20 @@ def _extract_rendering_config(src: object, asset_name: str = "data") -> dict:
             "stats": stats,
         })
 
-    data_category = _classify_data_category(dtype, band_count, colorinterp)
-    default_preset, presets = _detect_presets(data_category, bands_info, asset_name)
+    class_values: list[int] | None = None
+    if dataset_type == "segmentation_mask":
+        try:
+            default_preset, presets, class_values = _detect_segmentation_presets(src, asset_name, nodata)
+            data_category = "segmentation"
+        except Exception as exc:
+            logger.warning(
+                "segmentation colormap build failed, falling back to grayscale: %s", exc,
+            )
+            data_category = _classify_data_category(dtype, band_count, colorinterp)
+            default_preset, presets = _detect_presets(data_category, bands_info, asset_name)
+    else:
+        data_category = _classify_data_category(dtype, band_count, colorinterp)
+        default_preset, presets = _detect_presets(data_category, bands_info, asset_name)
 
     # Add nodata to all preset params
     if nodata is not None:
@@ -635,6 +709,9 @@ def _extract_rendering_config(src: object, asset_name: str = "data") -> dict:
         "default_preset": default_preset,
         "presets": presets,
     }
+    # Candidate class IDs for the value→class mapping UI (segmentation masks only).
+    if class_values is not None:
+        config["class_values"] = class_values
 
     # Ensure the entire config is JSON-safe (no NaN/Inf values)
     config = _sanitize_for_json(config)
@@ -798,7 +875,10 @@ def extract_unique_values(
             }
 
 
-def extract_cog_metadata(s3_uri: str, s3_config: dict, filename: str | None = None) -> dict:
+def extract_cog_metadata(
+    s3_uri: str, s3_config: dict, filename: str | None = None,
+    dataset_type: str = "imagery",
+) -> dict:
     """Extract spatial and radiometric metadata from a COG.
 
     Args:
@@ -897,7 +977,7 @@ def extract_cog_metadata(s3_uri: str, s3_config: dict, filename: str | None = No
 
             # Extract rendering config (band stats, presets) while file is open
             try:
-                rendering_config = _extract_rendering_config(src)
+                rendering_config = _extract_rendering_config(src, dataset_type=dataset_type)
             except Exception as exc:
                 logger.warning("rendering_config extraction failed: %s", exc)
                 rendering_config = None

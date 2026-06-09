@@ -34,6 +34,8 @@ class JobType(StrEnum):
     INGEST = "ingest"
     INFERENCE = "inference"
     IMPORT_ANNOTATIONS = "import_annotations"
+    VECTORIZE_RASTER_MASK = "vectorize_raster_mask"
+    RASTERIZE_ANNOTATION_SET = "rasterize_annotation_set"
 
 
 class MapLayerSourceType(StrEnum):

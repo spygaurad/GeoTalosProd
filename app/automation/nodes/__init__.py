@@ -6,4 +6,5 @@ from . import analysis
 from . import map_overlay
 from . import output
 from . import data_operations
+from . import conversion
 from . import advanced

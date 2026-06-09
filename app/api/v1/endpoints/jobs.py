@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_session, require_org_role
 from app.core.enums import JobStatus, JobType
 from app.models.ai_model import AIModel
+from app.models.annotation_class import AnnotationClass
 from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.models.map import Map
@@ -72,6 +73,24 @@ async def _create_inference_job(
         if map_row is None:
             raise HTTPException(status_code=404, detail="Map not found")
 
+    if payload.output_class_id is not None:
+        if model.annotation_schema_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail="output_class_id requires the model to have an annotation_schema_id",
+            )
+        cls = await db.scalar(
+            select(AnnotationClass).where(
+                AnnotationClass.id == payload.output_class_id,
+                AnnotationClass.schema_id == model.annotation_schema_id,
+            )
+        )
+        if cls is None:
+            raise HTTPException(
+                status_code=422,
+                detail="output_class_id does not belong to the model's annotation schema",
+            )
+
     run_output_config = dict(model.output_config or {})
     run_output_config.update(
         {
@@ -80,6 +99,10 @@ async def _create_inference_job(
             "mount_on_map": payload.mount_on_map,
             "aoi_bbox": payload.aoi_bbox,
             "prompt_payload": payload.prompt_payload or {},
+            "output_class_id": (
+                str(payload.output_class_id) if payload.output_class_id else None
+            ),
+            "render_params": payload.render_params or None,
         }
     )
     if payload.patch_size_px is not None:

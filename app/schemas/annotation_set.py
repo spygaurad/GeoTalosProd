@@ -1,8 +1,10 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
+from app.core.geometry import serialize_bbox
 from app.schemas.common import ORMModel, PaginatedResponse
 
 
@@ -47,6 +49,24 @@ class AnnotationSetMountRead(ORMModel):
     style_id: UUID | None
     style_override: dict | None
     mounted_at: datetime
+    # Enriched from the joined AnnotationSet (+ DatasetItem) so the map UI can
+    # filter mounts (e.g. by job_id for inference overlays) and seed layer
+    # metadata without a second round-trip per set.
+    set_name: str | None = None
+    schema_id: UUID | None = None
+    dataset_id: UUID | None = None
+    dataset_item_id: UUID | None = None
+    stac_item_id: str | None = None
+    job_id: UUID | None = None
+    source_type: str | None = None
+    review_status: str | None = None
+    # [minx, miny, maxx, maxy] — lets the panel test AOI containment client-side.
+    extent_4326: list[float] | None = None
+
+    @field_validator("extent_4326", mode="before")
+    @classmethod
+    def _coerce_mount_extent(cls, value: Any) -> list[float] | None:
+        return serialize_bbox(value)
 
 
 class AnnotationSetMountListResponse(ORMModel):
@@ -91,6 +111,10 @@ class AnnotationSetExportResponse(ORMModel):
     expires_in: int
 
 
+class AnnotationSetReviewUpdate(ORMModel):
+    review_status: str = Field(pattern=r"^(raw|corrected|verified)$")
+
+
 class AnnotationSetRead(ORMModel):
     id: UUID
     organization_id: UUID
@@ -103,10 +127,18 @@ class AnnotationSetRead(ORMModel):
     name: str
     description: str | None
     raster_config: dict | None = None
+    review_status: str = "raw"
+    # [minx, miny, maxx, maxy] over all live annotations; null when empty.
+    extent_4326: list[float] | None = None
     created_by_user_id: UUID | None
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None
+
+    @field_validator("extent_4326", mode="before")
+    @classmethod
+    def _coerce_extent(cls, value: Any) -> list[float] | None:
+        return serialize_bbox(value)
 
 
 AnnotationSetListResponse = PaginatedResponse[AnnotationSetRead]

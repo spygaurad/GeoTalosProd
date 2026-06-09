@@ -11,6 +11,7 @@ from __future__ import annotations
 from app.automation.adapters.base import OutputAdapter
 from app.automation.adapters import (
     coco_adapter,
+    crown_adapter,
     geojson_adapter,
     platform_adapter,
     sam3_adapter,
@@ -69,6 +70,25 @@ ADAPTER_REGISTRY: dict[str, OutputAdapter] = {
         },
         convert_fn=coco_adapter.convert,
     ),
+    "crown_to_platform": OutputAdapter(
+        name="crown_to_platform",
+        label="Crown (point)",
+        description="Converts crown detection {instances:[{label,score,point,bbox}]} outputs to platform Point predictions.",
+        supported_formats=["crown"],
+        config_schema={
+            "type": "object",
+            "properties": {
+                "label_field": {"type": "string", "default": "label"},
+                "score_field": {"type": "string", "default": "score"},
+                "point_field": {"type": "string", "default": "point"},
+                "bbox_field": {"type": "string", "default": "bbox"},
+                "default_label": {"type": "string", "default": "object"},
+                "min_score": {"type": "number", "default": 0.0},
+                "category_map": {"type": "object"},
+            },
+        },
+        convert_fn=crown_adapter.convert,
+    ),
     "sam3_to_platform": OutputAdapter(
         name="sam3_to_platform",
         label="SAM3",
@@ -85,7 +105,12 @@ ADAPTER_REGISTRY: dict[str, OutputAdapter] = {
                 "min_score": {"type": "number", "default": 0.0},
                 "prompt_key_map": {
                     "type": "object",
-                    "description": "Maps generic prompt_payload keys to the SAM3 request keys expected by the model endpoint.",
+                    "description": (
+                        "Maps generic prompt_payload keys to the SAM3 request keys "
+                        "expected by the model endpoint. For bbox prompts include "
+                        "`bboxes: bboxes` alongside `text_prompt: text_prompts` so one "
+                        "model can serve text, bbox, and text+bbox runs."
+                    ),
                     "additionalProperties": {"type": "string"},
                     "default": {},
                 },
@@ -93,6 +118,7 @@ ADAPTER_REGISTRY: dict[str, OutputAdapter] = {
         },
         convert_fn=sam3_adapter.convert,
         request_enricher=sam3_adapter.enrich_request,
+        prompt_resolver=sam3_adapter.resolve_prompt,
     ),
 }
 

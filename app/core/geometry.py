@@ -27,3 +27,19 @@ def serialize_geometry(value: Any) -> dict | None:
     if isinstance(value, (WKBElement, WKTElement)):
         return mapping(to_shape(value))
     return None
+
+
+def serialize_bbox(value: Any) -> list[float] | None:
+    """Convert a geometry value into a [minx, miny, maxx, maxy] bbox.
+
+    Accepts a WKB/WKT element (as stored on `annotation_sets.extent_4326`),
+    an already-computed bbox list, or None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        return [float(v) for v in value]
+    if isinstance(value, (WKBElement, WKTElement)):
+        minx, miny, maxx, maxy = to_shape(value).bounds
+        return [minx, miny, maxx, maxy]
+    return None

@@ -1,6 +1,8 @@
 .env
 .claude/
 CLAUDE.md
+docs*
+runs/
 next_steps.txt
 # Docker runtime artefacts — keep .env.docker (template) but not the live .env
 .pgdata/

@@ -226,12 +226,13 @@ def _prepare_single_cog(
     filename: str,
     collection: str,
     s3_config: dict,
+    dataset_type: str = "imagery",
 ) -> tuple[bool, list[str], str | None, dict | None]:
     """Validate a COG and prepare STAC item without inserting into pgSTAC.
 
     Returns (success, issues, stac_item_id, stac_item_dict).
     On failure stac_item_id and stac_item_dict are None.
-    
+
     This is used for batch processing to avoid pgSTAC partition constraint issues.
     """
     is_valid, issues = validate_cog(s3_uri, s3_config)
@@ -240,7 +241,7 @@ def _prepare_single_cog(
     if issues:
         logger.warning("cog_warnings uri=%s warnings=%s", s3_uri, issues)
 
-    metadata = extract_cog_metadata(s3_uri, s3_config, filename=filename)
+    metadata = extract_cog_metadata(s3_uri, s3_config, filename=filename, dataset_type=dataset_type)
     metadata["filename"] = filename
     item_id = _deterministic_item_id(s3_uri)
 
@@ -254,17 +255,20 @@ def _ingest_single_cog(
     filename: str,
     collection: str,
     s3_config: dict,
+    dataset_type: str = "imagery",
 ) -> tuple[bool, list[str], str | None, dict | None]:
     """Validate a COG and insert it as a STAC item.
 
     Returns (success, issues, stac_item_id, stac_item_dict).
     On failure stac_item_id and stac_item_dict are None.
-    
-    NOTE: This function inserts items one-at-a-time and can cause pgSTAC 
+
+    NOTE: This function inserts items one-at-a-time and can cause pgSTAC
     partition constraint issues. Use _prepare_single_cog + batch_upsert_stac_items
     for multi-item collections.
     """
-    success, issues, item_id, item = _prepare_single_cog(s3_uri, filename, collection, s3_config)
+    success, issues, item_id, item = _prepare_single_cog(
+        s3_uri, filename, collection, s3_config, dataset_type,
+    )
     
     if success and item:
         upsert_stac_item(item, settings.STAC_SYNC_DATABASE_URL)
@@ -396,7 +400,7 @@ def _ingest_folder_group(
 
             # Use _prepare_single_cog to avoid individual pgSTAC inserts
             success, issues, item_id, stac_item = _prepare_single_cog(
-                s3_uri, basename, collection, gdal_env
+                s3_uri, basename, collection, gdal_env, dataset.dataset_type
             )
 
             if success:
@@ -647,7 +651,7 @@ def ingest_dataset(self, job_id: str, dataset_id: str, s3_key: str, filename: st
                 collection = _ensure_collection(session, dataset, job.organization_id)
                 s3_uri = f"s3://{bucket}/{s3_key}"
                 success, issues, item_id, stac_item = _ingest_single_cog(
-                    s3_uri, filename, collection, gdal_env
+                    s3_uri, filename, collection, gdal_env, dataset.dataset_type
                 )
 
                 if not success:
@@ -1043,3 +1047,209 @@ def cleanup_stale_running_jobs():
                 )
 
     logger.info("cleanup_stale_running_jobs completed")
+
+
+@celery_app.task(bind=True, queue=INGESTION, max_retries=2, default_retry_delay=60)
+def rasterize_annotation_set(self, job_id: str) -> None:
+    """Rasterize vector annotation set(s) into a segmentation-mask COG dataset.
+
+    Runs on the ``ingestion`` queue (not bulk): it needs the GDAL runtime *and*
+    pgSTAC network access to ingest the generated COG as a dataset — exactly the
+    ingestion worker's environment. Reads ``job.config``:
+
+    ``annotation_set_ids``   vector sets to burn (required)
+    ``reference_dataset_id`` dataset whose native CRS + resolution define the
+                             output grid, so the mask aligns with the raster it
+                             will be compared to (optional)
+    ``resolution_m``         explicit ground sampling distance override (optional)
+    ``dataset_name``         output dataset name (optional)
+    ``automation_run_id``/``automation_step_id``  present when dispatched from a
+                             pipeline node — triggers ``resume_after_job`` so the
+                             waiting step continues with ``{"dataset": {...}}``.
+
+    On success the new ``segmentation_mask`` dataset is created, ingested, and
+    its ``rendering_config.class_map`` set so it renders with class colors.
+    """
+    from sqlalchemy import select
+
+    from app.core.enums import DatasetType
+    from app.models.annotation_set import AnnotationSet
+    from app.services.conversion import rasterize_annotation_sets_to_cog
+
+    job_uuid = uuid.UUID(job_id)
+    output_data: dict | None = None
+    automation_run_id = automation_step_id = None
+    tmp_path: str | None = None
+
+    with WorkerSession() as session:
+        job = session.get(Job, job_uuid)
+        if job is None:
+            logger.error("rasterize_annotation_set: job %s not found", job_id)
+            return
+        cfg = dict(job.config or {})
+        automation_run_id = cfg.get("automation_run_id")
+        automation_step_id = cfg.get("automation_step_id")
+        try:
+            job.status = JobStatus.RUNNING
+            job.started_at = _now()
+            session.commit()
+
+            set_ids = [uuid.UUID(str(s)) for s in (cfg.get("annotation_set_ids") or []) if s]
+            if not set_ids:
+                raise ValueError("job.config.annotation_set_ids is required")
+            sets = session.execute(
+                select(AnnotationSet).where(AnnotationSet.id.in_(set_ids))
+            ).scalars().all()
+            if len(sets) != len(set_ids):
+                raise ValueError("one or more annotation sets not found")
+            if any(s.organization_id != job.organization_id for s in sets):
+                raise ValueError("annotation set does not belong to this organization")
+
+            reference_item_uri = None
+            ref_ds_id = cfg.get("reference_dataset_id")
+            if ref_ds_id:
+                ref_item = session.execute(
+                    select(DatasetItem)
+                    .where(
+                        DatasetItem.dataset_id == uuid.UUID(str(ref_ds_id)),
+                        DatasetItem.organization_id == job.organization_id,
+                        DatasetItem.is_active.is_(True),
+                    )
+                    .limit(1)
+                ).scalar_one_or_none()
+                if ref_item is not None:
+                    reference_item_uri = ref_item.s3_uri
+
+            resolution_m = cfg.get("resolution_m")
+            fd, tmp_path = tempfile.mkstemp(suffix=".tif")
+            os.close(fd)
+            result = rasterize_annotation_sets_to_cog(
+                session,
+                set_ids,
+                tmp_path,
+                gdal_env=_gdal_env_for_worker(),
+                reference_item_uri=reference_item_uri,
+                resolution_m=float(resolution_m) if resolution_m not in (None, "") else None,
+            )
+
+            dataset = Dataset(
+                id=uuid.uuid4(),
+                organization_id=job.organization_id,
+                name=cfg.get("dataset_name") or f"{sets[0].name} · mask",
+                dataset_type=DatasetType.SEGMENTATION_MASK.value,
+                status=DatasetStatus.INGESTING,
+                created_by=job.created_by_user_id,
+            )
+            session.add(dataset)
+            session.flush()
+
+            filename = f"{dataset.id}.tif"
+            s3_key = storage_service.object_key(dataset.id, filename)
+            storage_service.ensure_org_bucket(job.organization_id)
+            storage_service.upload_from_path(
+                job.organization_id, s3_key, tmp_path, content_type="image/tiff"
+            )
+            bucket = storage_service.bucket_name(job.organization_id)
+            s3_uri = f"s3://{bucket}/{s3_key}"
+
+            collection = _ensure_collection(session, dataset, job.organization_id)
+            success, issues, item_id, stac_item = _ingest_single_cog(
+                s3_uri, filename, collection,
+                _gdal_env_for_worker(), DatasetType.SEGMENTATION_MASK.value,
+            )
+            if not success:
+                raise ValueError("\n".join(issues) or "COG validation failed")
+            _upsert_dataset_item(
+                session,
+                dataset_id=dataset.id,
+                organization_id=job.organization_id,
+                stac_item_id=item_id,
+                stac_collection_id=collection,
+                s3_uri=s3_uri,
+                filename=filename,
+                stac_item=stac_item,
+            )
+
+            # Build the class_map the segmentation-mask render path expects, and
+            # persist it on both the dataset and its item rendering_config.
+            class_map = {
+                "schema_id": str(result.schema_id) if result.schema_id else None,
+                "band_index": result.band_index,
+                "nodata_value": result.nodata_value,
+                "value_class_map": result.value_class_map,
+            }
+            agg = _compute_aggregated_metadata(dataset.stac_collection_id)
+            meta = dict((agg or {}).get("metadata") or {})
+            rc = dict(meta.get("rendering_config") or {})
+            rc["class_map"] = class_map
+            meta["rendering_config"] = rc
+            dataset.metadata_ = meta
+            if agg and agg.get("wkt"):
+                dataset.geometry = WKTElement(agg["wkt"], srid=4326)
+            dataset.status = DatasetStatus.READY
+
+            ds_item = session.execute(
+                select(DatasetItem).where(DatasetItem.stac_item_id == item_id)
+            ).scalar_one_or_none()
+            if ds_item is not None:
+                props = dict(ds_item.properties_cache or {})
+                item_rc = dict(props.get("rendering_config") or {})
+                item_rc["class_map"] = class_map
+                props["rendering_config"] = item_rc
+                ds_item.properties_cache = props
+
+            cfg["result"] = {
+                "dataset_id": str(dataset.id),
+                "value_class_map": result.value_class_map,
+                "feature_count": result.feature_count,
+                "width": result.width,
+                "height": result.height,
+                "crs": result.crs,
+            }
+            job.config = cfg
+            job.processed_items = 1
+            job.total_items = 1
+            job.progress = 1.0
+            job.status = JobStatus.COMPLETED
+            job.finished_at = _now()
+            session.commit()
+            logger.info(
+                "rasterize_annotation_set done job=%s dataset=%s size=%dx%d classes=%d",
+                job_id, dataset.id, result.width, result.height, len(result.value_class_map),
+            )
+
+            output_data = {
+                "dataset": {
+                    "id": str(dataset.id),
+                    "name": dataset.name,
+                    "dataset_type": DatasetType.SEGMENTATION_MASK.value,
+                    "value_class_map": result.value_class_map,
+                    "class_map": class_map,
+                }
+            }
+        except Exception as exc:
+            session.rollback()
+            logger.exception("rasterize_annotation_set failed job=%s", job_id)
+            try:
+                job = session.get(Job, job_uuid)
+                if job is not None:
+                    job.status = JobStatus.FAILED
+                    job.logs = str(exc)[:4000]
+                    job.finished_at = _now()
+                    session.commit()
+            except Exception:
+                logger.exception("could not mark job %s as failed", job_id)
+            raise
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    logger.warning("could not remove temp COG %s", tmp_path)
+
+    # Resume the automation pipeline after the session closes so the follow-up
+    # step reads committed Job/Dataset state.
+    if automation_run_id and automation_step_id and output_data is not None:
+        from app.workers.automation.tasks import resume_after_job  # noqa: PLC0415
+
+        resume_after_job.delay(job_id, output_data)

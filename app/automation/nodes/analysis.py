@@ -153,7 +153,7 @@ def execute_timeseries_analysis(session, config, input_data, **kwargs):
     category="analysis",
     label="Aggregate Model Runs",
     description="Accumulate outputs from multiple model runs into a single structured JSON summary.",
-    inputs=[HandleDef(handle="predictions", type="raw_predictions", label="Predictions", multiple=True)],
+    inputs=[HandleDef(handle="annotation_sets", type="annotation_set", label="Annotation Sets", multiple=True)],
     outputs=[HandleDef(handle="summary", type="quality_metrics", label="Run Summary")],
     config_schema={},
     icon="table",
@@ -163,7 +163,7 @@ def execute_aggregate_model_runs(session, config, input_data, **kwargs):
     from app.models.ai_model import AIModel
     from app.models.job import Job
 
-    predictions = input_data.get("predictions", [])
+    predictions = input_data.get("annotation_sets", [])
     if isinstance(predictions, dict):
         predictions = [predictions]
     predictions = [p for p in predictions if p]

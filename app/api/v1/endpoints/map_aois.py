@@ -382,11 +382,17 @@ async def create_map_aoi_inference_job(
     if not items:
         raise HTTPException(status_code=422, detail="No dataset items available for this AOI inference run")
 
+    # This endpoint is always launched from an AOI, so every run is spatially
+    # clipped to the AOI bbox regardless of scope. `scope` only chooses which
+    # items/frames are processed ('aoi' = items intersecting the AOI; 'dataset'
+    # = the whole collection, e.g. a temporal sequence) — it must NOT widen the
+    # spatial extent back to full frames. Passing aoi_bbox here makes the worker
+    # crop each patch to the AOI window (see model_manager._resolve_effective_aoi).
     inference_payload = payload.to_inference_job(
         dataset_item_ids=[item.id for item in items],
         map_id=map_id,
         project_id=map_row.project_id,
-        aoi_bbox=aoi.bbox_4326 if payload.scope == "aoi" else None,
+        aoi_bbox=aoi.bbox_4326,
     )
     return await _create_inference_job(
         inference_payload,

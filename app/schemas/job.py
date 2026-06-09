@@ -35,6 +35,24 @@ class InferenceJobCreate(ORMModel):
     mount_on_map: bool = False
     aoi_bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
     prompt_payload: dict[str, Any] | None = None
+    output_class_id: UUID | None = Field(
+        default=None,
+        description=(
+            "When set, every prediction returned by the model is assigned to this "
+            "annotation_class_id, bypassing label-based mapping. Use for prompted "
+            "models (e.g. SAM3 text) where the user picks the class explicitly and "
+            "the prompt is just a hint to the endpoint."
+        ),
+    )
+    render_params: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "TiTiler query params used when rendering per-patch PNGs sent to the "
+            "model endpoint. Typically {asset_bidx, rescale} computed from the AOI "
+            "source layer's band selection. Overrides the dataset-level default "
+            "preset; falls back to it when omitted."
+        ),
+    )
     patch_size_px: int | None = Field(default=None, ge=64, le=4096)
     stride_px: int | None = Field(default=None, ge=32, le=4096)
     max_patches_per_item: int | None = Field(default=None, ge=1, le=4096)

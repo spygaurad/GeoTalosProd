@@ -173,17 +173,37 @@ class AnnotationSetService:
 
     async def list_map_mounts(
         self, map_id: UUID, organization_id: UUID
-    ) -> tuple[Sequence[MapAnnotationSet], int]:
+    ) -> tuple[list[tuple[MapAnnotationSet, AnnotationSet, str | None]], int]:
+        """Returns (mount, joined_set, stac_item_id) tuples so the endpoint can
+        flatten the AnnotationSet's identifying fields (name, schema_id,
+        job_id, dataset_item_id) plus the dataset_item's stac_item_id into the
+        mount response without a second round-trip."""
         await self._get_map_for_org(map_id, organization_id)
-        query = select(MapAnnotationSet).where(MapAnnotationSet.map_id == map_id)
+        query = (
+            select(MapAnnotationSet, AnnotationSet, DatasetItem.stac_item_id)
+            .join(AnnotationSet, AnnotationSet.id == MapAnnotationSet.annotation_set_id)
+            .outerjoin(DatasetItem, DatasetItem.id == AnnotationSet.dataset_item_id)
+            .where(
+                MapAnnotationSet.map_id == map_id,
+                AnnotationSet.organization_id == organization_id,
+                AnnotationSet.deleted_at.is_(None),
+            )
+            .order_by(MapAnnotationSet.z_index.asc())
+        )
         count_query = (
             select(func.count())
             .select_from(MapAnnotationSet)
-            .where(MapAnnotationSet.map_id == map_id)
+            .join(AnnotationSet, AnnotationSet.id == MapAnnotationSet.annotation_set_id)
+            .where(
+                MapAnnotationSet.map_id == map_id,
+                AnnotationSet.organization_id == organization_id,
+                AnnotationSet.deleted_at.is_(None),
+            )
         )
-        rows = await self.db.scalars(query.order_by(MapAnnotationSet.z_index.asc()))
+        result = await self.db.execute(query)
+        rows = [(mount, ann_set, stac_id) for mount, ann_set, stac_id in result.all()]
         total = await self.db.scalar(count_query)
-        return rows.all(), int(total or 0)
+        return rows, int(total or 0)
 
     async def get_set(self, set_id: UUID, organization_id: UUID) -> AnnotationSet:
         result = await self.db.execute(
@@ -217,12 +237,152 @@ class AnnotationSetService:
         annotation_set = AnnotationSet(**data)
         self.db.add(annotation_set)
         try:
+            await self.db.flush()
+            from app.services.annotation_set_grouping import ensure_schema_collection_async
+            await ensure_schema_collection_async(self.db, annotation_set)
             await self.db.commit()
         except IntegrityError as exc:
             await self.db.rollback()
             raise conflict("Annotation set violates constraints") from exc
         await self.db.refresh(annotation_set)
         return annotation_set
+
+    async def ensure_annotation_set(
+        self,
+        *,
+        map_id: UUID,
+        organization_id: UUID,
+        created_by_user_id: UUID,
+        schema_id: UUID,
+        dataset_id: UUID | None = None,
+        name: str | None = None,
+    ) -> AnnotationSet:
+        """Find — or create — the mutable manual annotation set for a given
+        map + schema + user, ensuring it is mounted on the map.
+
+        Human map drawing accumulates into a single per-(map, schema, user)
+        set instead of spawning one set per annotation. Only ``manual`` sets
+        are matched, so model/import/analysis sets are never reused here. The
+        set always carries a non-null ``schema_id``, keeping it eligible for
+        single-schema annotation-set collections.
+        """
+        await self._get_map_for_org(map_id, organization_id)
+        await self._require_schema_for_org(schema_id, organization_id)
+
+        existing = await self.db.execute(
+            select(AnnotationSet)
+            .join(MapAnnotationSet, MapAnnotationSet.annotation_set_id == AnnotationSet.id)
+            .where(
+                MapAnnotationSet.map_id == map_id,
+                AnnotationSet.organization_id == organization_id,
+                AnnotationSet.schema_id == schema_id,
+                AnnotationSet.source_type == "manual",
+                AnnotationSet.created_by_user_id == created_by_user_id,
+                AnnotationSet.deleted_at.is_(None),
+            )
+            .order_by(AnnotationSet.created_at.asc())
+            .limit(1)
+        )
+        annotation_set = existing.scalar_one_or_none()
+        if annotation_set is not None:
+            return annotation_set
+
+        created = await self.create_set(
+            AnnotationSetCreate(
+                schema_id=schema_id,
+                dataset_id=dataset_id,
+                source_type="manual",
+                name=name or "Manual annotations",
+            ),
+            organization_id=organization_id,
+            created_by_user_id=created_by_user_id,
+        )
+        await self.mount_set_on_map(
+            map_id,
+            AnnotationSetMountRequest(annotation_set_id=created.id),
+            organization_id,
+        )
+        return created
+
+    async def ensure_verified_set(
+        self,
+        *,
+        map_id: UUID,
+        organization_id: UUID,
+        schema_id: UUID,
+        created_by_user_id: UUID,
+        dataset_id: UUID | None = None,
+        schema_name: str | None = None,
+    ) -> tuple[AnnotationSet, bool]:
+        """Find — or create — the single human-verified set for a map + schema.
+
+        Verified annotations from every AOI accumulate into ONE durable set per
+        (map, schema). AOI grouping is a UI lens driven by per-annotation
+        ``properties.aoi_*`` metadata, never a separate set per AOI — AOIs are
+        deletable and verified ground-truth must outlive them. Matched only
+        among ``manual`` sets flagged ``review_status='verified'``.
+
+        Returns ``(set, created)`` so callers can tell the UI whether a brand
+        new set was mounted (and therefore needs to be added as a map layer).
+        """
+        map_row = await self._get_map_for_org(map_id, organization_id)
+        await self._require_schema_for_org(schema_id, organization_id)
+
+        existing = await self.db.execute(
+            select(AnnotationSet)
+            .join(MapAnnotationSet, MapAnnotationSet.annotation_set_id == AnnotationSet.id)
+            .where(
+                MapAnnotationSet.map_id == map_id,
+                AnnotationSet.organization_id == organization_id,
+                AnnotationSet.schema_id == schema_id,
+                AnnotationSet.dataset_id == dataset_id,
+                AnnotationSet.source_type == "manual",
+                AnnotationSet.review_status == "verified",
+                AnnotationSet.deleted_at.is_(None),
+            )
+            .order_by(AnnotationSet.created_at.asc())
+            .limit(1)
+        )
+        found = existing.scalar_one_or_none()
+        if found is not None:
+            return found, False
+
+        # Name reflects both the schema and (when dataset-scoped) the dataset, so
+        # the per-dataset verified sets are distinguishable in the layer list.
+        dataset_name = None
+        if dataset_id is not None:
+            dataset_name = await self.db.scalar(
+                select(Dataset.name).where(Dataset.id == dataset_id)
+            )
+        if schema_name and dataset_name:
+            name = f"Verified — {schema_name} ({dataset_name})"
+        elif schema_name:
+            name = f"Verified — {schema_name}"
+        else:
+            name = "Verified annotations"
+        created = await self.create_set(
+            AnnotationSetCreate(
+                schema_id=schema_id,
+                dataset_id=dataset_id,
+                source_type="manual",
+                name=name,
+            ),
+            organization_id=organization_id,
+            created_by_user_id=created_by_user_id,
+        )
+        created.review_status = "verified"
+        await self.db.commit()
+        await self.db.refresh(created)
+
+        await self.mount_set_on_map(
+            map_id,
+            AnnotationSetMountRequest(annotation_set_id=created.id),
+            organization_id,
+        )
+        await self.link_set_to_project(
+            map_row.project_id, created.id, organization_id, linked_by=created_by_user_id
+        )
+        return created, True
 
     async def update_set(
         self,
@@ -254,6 +414,26 @@ class AnnotationSetService:
         annotation_set = await self.get_set(set_id, organization_id)
         annotation_set.deleted_at = datetime.now(UTC).replace(tzinfo=None)
         await self.db.commit()
+
+    async def set_review_status(
+        self, set_id: UUID, review_status: str, organization_id: UUID
+    ) -> AnnotationSet:
+        annotation_set = await self.get_set(set_id, organization_id)
+        annotation_set.review_status = review_status
+        await self.db.commit()
+        await self.db.refresh(annotation_set)
+        return annotation_set
+
+    def mark_corrected_if_model(self, annotation_set: AnnotationSet) -> None:
+        """Promote a model-sourced set to 'corrected' the first time a human
+        touches one of its annotations. Verified sets are left untouched —
+        re-opening a verified set is an explicit decision made through the
+        review-status endpoint, not an implicit side effect of an edit.
+
+        Mutates in place; the caller's commit persists it.
+        """
+        if annotation_set.source_type == "model" and annotation_set.review_status == "raw":
+            annotation_set.review_status = "corrected"
 
     async def link_set_to_project(
         self,

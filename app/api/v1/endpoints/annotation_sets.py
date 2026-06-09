@@ -33,6 +33,7 @@ from app.schemas.annotation_set import (
     AnnotationSetMountUpdate,
     AnnotationSetProjectLinkRead,
     AnnotationSetRead,
+    AnnotationSetReviewUpdate,
     AnnotationSetUpdate,
     RasterMaskConfigRead,
     RasterMaskConfigUpdate,
@@ -233,6 +234,25 @@ async def update_annotation_set(
     annotation_set = await service.update_set(set_id, payload, organization_id=org_id)
     await log_audit_event(
         action="annotation_sets.update", actor_id=str(current_user.id),
+        organization_id=str(org_id), entity="annotation_set", entity_id=str(set_id), session=db,
+    )
+    return annotation_set
+
+
+@router.patch("/{set_id}/review-status", response_model=AnnotationSetRead)
+async def update_annotation_set_review_status(
+    set_id: UUID,
+    payload: AnnotationSetReviewUpdate,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    service = AnnotationSetService(db)
+    annotation_set = await service.set_review_status(
+        set_id, payload.review_status, organization_id=org_id
+    )
+    await log_audit_event(
+        action="annotation_sets.review_status", actor_id=str(current_user.id),
         organization_id=str(org_id), entity="annotation_set", entity_id=str(set_id), session=db,
     )
     return annotation_set
@@ -637,7 +657,29 @@ async def list_map_annotation_set_mounts(
     service = AnnotationSetService(db)
     items, total = await service.list_map_mounts(map_id, org_id)
     return AnnotationSetMountListResponse(
-        items=[AnnotationSetMountRead.model_validate(item) for item in items], total=total,
+        items=[
+            AnnotationSetMountRead(
+                map_id=mount.map_id,
+                annotation_set_id=mount.annotation_set_id,
+                visible=mount.visible,
+                opacity=mount.opacity,
+                z_index=mount.z_index,
+                style_id=mount.style_id,
+                style_override=mount.style_override,
+                mounted_at=mount.mounted_at,
+                set_name=ann_set.name,
+                schema_id=ann_set.schema_id,
+                dataset_id=ann_set.dataset_id,
+                dataset_item_id=ann_set.dataset_item_id,
+                stac_item_id=stac_item_id,
+                job_id=ann_set.job_id,
+                source_type=ann_set.source_type,
+                review_status=ann_set.review_status,
+                extent_4326=ann_set.extent_4326,
+            )
+            for mount, ann_set, stac_item_id in items
+        ],
+        total=total,
     )
 
 

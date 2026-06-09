@@ -52,53 +52,186 @@ def _uuid_list(values: list | None) -> list[uuid.UUID]:
 
 
 @node(
-    type="select_dataset",
+    type="select_data_source",
     category="data_source",
-    label="Select Dataset",
-    description="Choose a dataset by ID.",
-    outputs=[HandleDef(handle="dataset", type="dataset")],
-    config_schema={
-        "type": "object",
-        "properties": {"dataset_id": {"type": "string", "format": "uuid", "title": "Dataset", "x-picker": "dataset"}},
-        "required": ["dataset_id"],
-    },
-    icon="database",
-)
-def execute_select_dataset(session, config, input_data, **kwargs):
-    from app.models.dataset import Dataset
-    dataset = session.get(Dataset, uuid.UUID(config["dataset_id"]))
-    if not dataset:
-        raise ValueError(f"Dataset {config['dataset_id']} not found")
-    return {"dataset": {"id": str(dataset.id), "name": dataset.name}}
-
-
-@node(
-    type="select_dataset_items",
-    category="data_source",
-    label="Select Dataset Items",
-    description="Choose items from a dataset (optional filters).",
-    outputs=[HandleDef(handle="items", type="dataset_items")],
+    label="Select Data Source",
+    description=(
+        "Unified data picker. Choose a Map, a Dataset, specific Dataset Items, "
+        "and/or a saved AOI — each level below the first is optional. Outputs a "
+        "consolidated data object with items, dataset info, and AOI context ready to "
+        "wire into Run Inference, map overlays, or exports."
+    ),
+    # Three discrete outputs whose handle names match the keys returned by the
+    # executor (the engine wires inputs via output_data[edge.sourceHandle]) and
+    # whose types match downstream consumers:
+    #   dataset    → overlay_dataset_on_map / analysis nodes (type "dataset")
+    #   items      → Run Inference items input (type "dataset_items")
+    #   selection  → Run Inference aoi input (type "map_selection"; carries aoi_bbox)
+    # `dataset` is only populated when a single dataset is picked, so it's optional.
+    outputs=[
+        HandleDef(handle="dataset", type="dataset", label="Dataset", required=False),
+        HandleDef(handle="items", type="dataset_items", label="Dataset Items"),
+        HandleDef(handle="selection", type="map_selection", label="AOI / Selection", required=False),
+    ],
     config_schema={
         "type": "object",
         "properties": {
-            "dataset_id": {"type": "string", "format": "uuid", "title": "Dataset", "x-picker": "dataset"},
-            "filter": {"type": "object", "title": "Filter (JSON)", "default": {}},
+            "map_id": {
+                "type": "string",
+                "format": "uuid",
+                "title": "Map",
+                "description": "Optional. Scope to a map; required when picking a saved AOI.",
+                "x-picker": "map",
+            },
+            "dataset_id": {
+                "type": "string",
+                "format": "uuid",
+                "title": "Dataset",
+                "description": "Optional. Leave empty to use every dataset attached to the map.",
+                "x-picker": "dataset",
+            },
+            "item_ids": {
+                "type": "array",
+                "items": {"type": "string", "format": "uuid"},
+                "title": "Specific Items",
+                "description": "Optional. Pick individual items; leave empty to use the whole dataset.",
+                "x-picker": "dataset_items",
+                "x-picker-depends-on": "dataset_id",
+                "default": [],
+            },
+            "aoi_id": {
+                "type": "string",
+                "format": "uuid",
+                "title": "Saved AOI",
+                "description": "Optional. Filter items to a saved AOI's area on the chosen map.",
+                "x-picker": "map_aoi",
+                "x-picker-depends-on": "map_id",
+            },
             "limit": {"type": "integer", "title": "Max Items", "default": 1000},
         },
-        "required": ["dataset_id"],
     },
     icon="database",
+    color="#3B82F6",
 )
-def execute_select_dataset_items(session, config, input_data, **kwargs):
+def execute_select_data_source(session, config, input_data, **kwargs):
+    """Resolve a hierarchical Map / Dataset / Items / AOI selection.
+
+    Supersedes select_dataset, select_dataset_items, select_map_datasets,
+    select_map_dataset_items_in_aoi, and select_saved_map_aoi. Each level below
+    the first is optional:
+
+    * dataset only                  → all (or specific) items in that dataset
+    * dataset + item_ids            → just those items
+    * dataset + aoi                 → items in the dataset that fall in the AOI
+    * map only                      → every dataset on the map and their items
+    * map + aoi (no dataset)        → map items in the AOI (honours the AOI's
+                                      saved item selection when present)
+
+    Emits `dataset` (when a single dataset is chosen), `items`, and a
+    `selection` map_selection carrying the AOI bbox.
+    """
     from sqlalchemy import select
+
+    from app.models.dataset import Dataset
     from app.models.dataset_item import DatasetItem
-    stmt = select(DatasetItem.id, DatasetItem.stac_item_id).where(
-        DatasetItem.dataset_id == uuid.UUID(config["dataset_id"])
-    )
-    if config.get("limit"):
-        stmt = stmt.limit(config["limit"])
-    items = session.execute(stmt).all()
-    return {"items": [{"id": str(i.id), "stac_item_id": i.stac_item_id} for i in items]}
+    from app.models.map import Map
+    from app.models.map_aoi import MapAOI
+    from app.models.map_layer import MapLayer
+
+    map_id = config.get("map_id")
+    dataset_id = config.get("dataset_id")
+    item_ids = config.get("item_ids") or []
+    aoi_id = config.get("aoi_id")
+    limit = config.get("limit") or 1000
+
+    if not dataset_id and not map_id:
+        raise ValueError("Select at least a dataset or a map")
+
+    map_id_uuid = uuid.UUID(map_id) if map_id else None
+    if map_id_uuid and not session.get(Map, map_id_uuid):
+        raise ValueError(f"Map {map_id} not found")
+
+    # Resolve the AOI (bbox + persisted selection) when one is chosen.
+    aoi = None
+    bbox_4326 = None
+    saved_cfg: dict = {}
+    if aoi_id:
+        if not map_id_uuid:
+            raise ValueError("Pick a map before selecting a saved AOI")
+        aoi = session.get(MapAOI, uuid.UUID(aoi_id))
+        if not aoi or aoi.map_id != map_id_uuid or aoi.deleted_at is not None:
+            raise ValueError(f"Saved AOI {aoi_id} not found on map {map_id}")
+        bbox_4326 = _parse_bbox_4326(aoi.bbox_4326)
+        saved_cfg = aoi.selection_config or {}
+
+    # Resolve which datasets to draw items from.
+    if dataset_id:
+        dataset_id_uuid = uuid.UUID(dataset_id)
+        dataset = session.get(Dataset, dataset_id_uuid)
+        if not dataset or dataset.deleted_at is not None:
+            raise ValueError(f"Dataset {dataset_id} not found")
+        if map_id_uuid:
+            on_map = session.execute(
+                select(MapLayer.id).where(
+                    MapLayer.map_id == map_id_uuid,
+                    MapLayer.dataset_id == dataset_id_uuid,
+                )
+            ).scalar_one_or_none()
+            if on_map is None:
+                raise ValueError(f"Dataset {dataset_id} is not attached to map {map_id}")
+        datasets = [dataset]
+    else:
+        datasets = session.execute(
+            select(Dataset)
+            .join(MapLayer, MapLayer.dataset_id == Dataset.id)
+            .where(MapLayer.map_id == map_id_uuid, Dataset.deleted_at.is_(None))
+            .distinct()
+            .order_by(Dataset.created_at.desc())
+        ).scalars().all()
+
+    dataset_uuids = [d.id for d in datasets]
+
+    # Pull candidate items.
+    items_payload: list[dict] = []
+    if dataset_uuids:
+        stmt = select(DatasetItem).where(
+            DatasetItem.dataset_id.in_(dataset_uuids),
+            DatasetItem.is_active.is_(True),
+        )
+        if item_ids:
+            stmt = stmt.where(DatasetItem.id.in_([uuid.UUID(str(i)) for i in item_ids]))
+        elif not dataset_id and saved_cfg.get("dataset_item_ids"):
+            # Honour the AOI's persisted item selection when nothing narrower
+            # was chosen.
+            stmt = stmt.where(DatasetItem.id.in_(_uuid_list(saved_cfg.get("dataset_item_ids"))))
+        candidates = session.execute(stmt.limit(limit)).scalars().all()
+
+        if bbox_4326 is not None:
+            candidates = [it for it in candidates if _geometry_intersects_bbox(it.geometry, bbox_4326)]
+        items_payload = [_serialize_dataset_item(it) for it in candidates]
+
+    datasets_payload = [_serialize_dataset(d) for d in datasets]
+    selection: dict = {
+        "map_id": str(map_id_uuid) if map_id_uuid else None,
+        "aoi_id": str(aoi.id) if aoi else None,
+        "aoi_bbox": bbox_4326,
+        "datasets": datasets_payload,
+        "dataset_ids": [d["id"] for d in datasets_payload],
+        "dataset_items": items_payload,
+        "dataset_item_ids": [it["id"] for it in items_payload],
+    }
+    if aoi is not None:
+        selection["geometry"] = aoi.geometry
+        selection["render_config"] = aoi.render_config or {}
+        selection["temporal_config"] = aoi.temporal_config or {}
+        selection["analysis_config"] = aoi.analysis_config or {}
+
+    result: dict = {"items": items_payload, "selection": selection}
+    # A single explicitly-chosen dataset feeds the `dataset` handle used by
+    # overlay / analysis nodes.
+    if dataset_id and datasets:
+        result["dataset"] = {"id": datasets_payload[0]["id"], "name": datasets[0].name}
+    return result
 
 
 @node(
@@ -109,7 +242,14 @@ def execute_select_dataset_items(session, config, input_data, **kwargs):
     outputs=[HandleDef(handle="annotation_set", type="annotation_set")],
     config_schema={
         "type": "object",
-        "properties": {"annotation_set_id": {"type": "string", "format": "uuid", "title": "Annotation Set"}},
+        "properties": {
+            "annotation_set_id": {
+                "type": "string",
+                "format": "uuid",
+                "title": "Annotation Set",
+                "x-picker": "annotation_set",
+            }
+        },
         "required": ["annotation_set_id"],
     },
     icon="tag",
@@ -217,54 +357,6 @@ def execute_aoi_filter(session, config, input_data, **kwargs):
     )
     rows = session.execute(stmt).all()
     return {"items": [{"id": str(r.id), "stac_item_id": r.stac_item_id} for r in rows]}
-
-
-@node(
-    type="select_map_datasets",
-    category="data_source",
-    label="Select Map Datasets",
-    description="Load all datasets currently attached to a map.",
-    outputs=[HandleDef(handle="selection", type="map_selection", label="Map Selection")],
-    config_schema={
-        "type": "object",
-        "properties": {
-            "map_id": {"type": "string", "format": "uuid", "title": "Map", "x-picker": "map"},
-        },
-        "required": ["map_id"],
-    },
-    icon="layers",
-    color="#3B82F6",
-)
-def execute_select_map_datasets(session, config, input_data, **kwargs):
-    from sqlalchemy import select
-
-    from app.models.dataset import Dataset
-    from app.models.map import Map
-    from app.models.map_layer import MapLayer
-
-    map_id = uuid.UUID(config["map_id"])
-    map_row = session.get(Map, map_id)
-    if not map_row:
-        raise ValueError(f"Map {config['map_id']} not found")
-
-    datasets = session.execute(
-        select(Dataset)
-        .join(MapLayer, MapLayer.dataset_id == Dataset.id)
-        .where(
-            MapLayer.map_id == map_id,
-            Dataset.deleted_at.is_(None),
-        )
-        .distinct()
-        .order_by(Dataset.created_at.desc())
-    ).scalars().all()
-    datasets_payload = [_serialize_dataset(row) for row in datasets]
-    return {
-        "selection": {
-            "map_id": str(map_id),
-            "datasets": datasets_payload,
-            "dataset_ids": [d["id"] for d in datasets_payload],
-        }
-    }
 
 
 @node(
@@ -386,124 +478,6 @@ def execute_search_map_aoi_resources(session, config, input_data, **kwargs):
 
 
 @node(
-    type="select_map_dataset_items_in_aoi",
-    category="data_source",
-    label="Select Map Dataset Items In AOI",
-    description="Load dataset items from a map dataset that intersect the AOI.",
-    outputs=[
-        HandleDef(handle="items", type="dataset_items", label="Dataset Items"),
-        HandleDef(handle="selection", type="map_selection", label="Map Selection"),
-    ],
-    config_schema={
-        "type": "object",
-        "properties": {
-            "map_id": {"type": "string", "format": "uuid", "title": "Map", "x-picker": "map"},
-            "dataset_id": {"type": "string", "format": "uuid", "title": "Dataset", "x-picker": "dataset"},
-            "aoi_bbox": {
-                "type": "array",
-                "title": "AOI Bounding Box",
-                "items": {"type": "number"},
-                "minItems": 4,
-                "maxItems": 4,
-            },
-        },
-        "required": ["map_id", "dataset_id", "aoi_bbox"],
-    },
-    icon="map-pin",
-    color="#3B82F6",
-)
-def execute_select_map_dataset_items_in_aoi(session, config, input_data, **kwargs):
-    from sqlalchemy import select
-
-    from app.models.dataset import Dataset
-    from app.models.dataset_item import DatasetItem
-    from app.models.map import Map
-    from app.models.map_layer import MapLayer
-
-    map_id = uuid.UUID(config["map_id"])
-    dataset_id = uuid.UUID(config["dataset_id"])
-    bbox_4326 = _parse_bbox_4326(config["aoi_bbox"])
-
-    map_row = session.get(Map, map_id)
-    if not map_row:
-        raise ValueError(f"Map {config['map_id']} not found")
-
-    dataset_on_map = session.execute(
-        select(MapLayer.id).where(
-            MapLayer.map_id == map_id,
-            MapLayer.dataset_id == dataset_id,
-        )
-    ).scalar_one_or_none()
-    if dataset_on_map is None:
-        raise ValueError(f"Dataset {config['dataset_id']} is not attached to map {config['map_id']}")
-
-    dataset = session.get(Dataset, dataset_id)
-    if not dataset or dataset.deleted_at is not None:
-        raise ValueError(f"Dataset {config['dataset_id']} not found")
-
-    items = session.execute(
-        select(DatasetItem).where(
-            DatasetItem.dataset_id == dataset_id,
-            DatasetItem.is_active.is_(True),
-        )
-    ).scalars().all()
-    matched = [item for item in items if _geometry_intersects_bbox(item.geometry, bbox_4326)]
-    items_payload = [_serialize_dataset_item(item) for item in matched]
-    return {
-        "items": items_payload,
-        "selection": {
-            "map_id": str(map_id),
-            "aoi_bbox": bbox_4326,
-            "datasets": [_serialize_dataset(dataset)],
-            "dataset_ids": [str(dataset_id)],
-            "dataset_items": items_payload,
-        },
-    }
-
-
-@node(
-    type="select_saved_map_aoi",
-    category="data_source",
-    label="Select Saved Map AOI",
-    description="Load a saved AOI with its persisted selection and rendering state.",
-    outputs=[HandleDef(handle="selection", type="map_selection", label="Map Selection")],
-    config_schema={
-        "type": "object",
-        "properties": {
-            "map_id": {"type": "string", "format": "uuid", "title": "Map", "x-picker": "map"},
-            "aoi_id": {"type": "string", "format": "uuid", "title": "Saved AOI"},
-        },
-        "required": ["map_id", "aoi_id"],
-    },
-    icon="bookmark",
-    color="#3B82F6",
-)
-def execute_select_saved_map_aoi(session, config, input_data, **kwargs):
-    from app.models.map_aoi import MapAOI
-
-    map_id = uuid.UUID(config["map_id"])
-    aoi_id = uuid.UUID(config["aoi_id"])
-    aoi = session.get(MapAOI, aoi_id)
-    if not aoi or aoi.map_id != map_id or aoi.deleted_at is not None:
-        raise ValueError(f"Saved AOI {config['aoi_id']} not found on map {config['map_id']}")
-
-    selection_cfg = aoi.selection_config or {}
-    return {
-        "selection": {
-            "map_id": str(map_id),
-            "aoi_id": str(aoi.id),
-            "aoi_bbox": aoi.bbox_4326,
-            "geometry": aoi.geometry,
-            "dataset_ids": [str(v) for v in selection_cfg.get("dataset_ids", [])],
-            "dataset_item_ids": [str(v) for v in selection_cfg.get("dataset_item_ids", [])],
-            "render_config": aoi.render_config or {},
-            "temporal_config": aoi.temporal_config or {},
-            "analysis_config": aoi.analysis_config or {},
-        }
-    }
-
-
-@node(
     type="load_saved_map_aoi_timeline",
     category="data_source",
     label="Load Saved AOI Timeline",
@@ -516,7 +490,13 @@ def execute_select_saved_map_aoi(session, config, input_data, **kwargs):
         "type": "object",
         "properties": {
             "map_id": {"type": "string", "format": "uuid", "title": "Map", "x-picker": "map"},
-            "aoi_id": {"type": "string", "format": "uuid", "title": "Saved AOI"},
+            "aoi_id": {
+                "type": "string",
+                "format": "uuid",
+                "title": "Saved AOI",
+                "x-picker": "map_aoi",
+                "x-picker-depends-on": "map_id",
+            },
         },
         "required": ["map_id", "aoi_id"],
     },

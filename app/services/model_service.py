@@ -59,14 +59,14 @@ class AIModelService:
             raise not_found("Model")
         return model
 
-    async def create_model(self, payload: AIModelCreate) -> AIModel:
-        model = AIModel(**payload.model_dump())
+    async def create_model(self, payload: AIModelCreate, organization_id: UUID) -> AIModel:
+        model = AIModel(**payload.model_dump(), organization_id=organization_id)
         self.db.add(model)
         try:
             await self.db.commit()
         except IntegrityError as exc:
             await self.db.rollback()
-            logger.warning("create_model_conflict organization_id=%s", payload.organization_id)
+            logger.warning("create_model_conflict organization_id=%s", organization_id)
             raise conflict("Model creation violates uniqueness or FK constraints") from exc
         await self.db.refresh(model)
         logger.info("create_model_success model_id=%s", model.id)

@@ -5,40 +5,59 @@ from app.automation.registry import node, HandleDef
 
 
 @node(
-    type="manual_trigger",
+    type="trigger",
     category="triggers",
-    label="Manual Trigger",
-    description="User clicks Run from the UI. No configuration needed.",
-    outputs=[HandleDef(handle="trigger", type="trigger_data", required=False, label="Trigger Data")],
-    config_schema={},
-    icon="play",
-)
-def execute_manual_trigger(session, config, input_data, **kwargs):
-    return {"trigger": kwargs.get("trigger_data", {})}
-
-
-@node(
-    type="schedule_trigger",
-    category="triggers",
-    label="On Schedule (Cron)",
-    description="Runs on a time schedule. Configure cron expression and timezone.",
+    label="Trigger",
+    description=(
+        "Every pipeline starts here. Choose how it fires: Manually (Run button), "
+        "Once at a specific date/time, or on a Recurring schedule. "
+        "Trigger Data is the run's starting context — what fired the pipeline and "
+        "when, plus any payload that came with the event. Wire its output into a "
+        "downstream node only when that node should react to those specifics; most "
+        "source nodes ignore it and load their own inputs."
+    ),
     outputs=[HandleDef(handle="trigger", type="trigger_data", required=False, label="Trigger Data")],
     config_schema={
         "type": "object",
         "properties": {
+            "mode": {
+                "type": "string",
+                "title": "When to run",
+                "enum": ["manual", "once", "recurring"],
+                "x-enum-labels": ["Manual (Run button)", "Once at…", "Recurring (schedule)"],
+                "default": "manual",
+            },
+            "run_at": {
+                "type": "string",
+                "format": "date-time",
+                "title": "Run At",
+                "description": "Date and time for a one-off run (used when mode is 'once').",
+                "x-visible-when": {"mode": "once"},
+            },
             "cron_expression": {
                 "type": "string",
                 "title": "Cron Expression",
-                "description": "e.g., '0 9 * * 1' for Mondays at 9am UTC",
+                "description": "e.g., '0 9 * * 1' for Mondays at 9am.",
                 "default": "0 0 * * *",
+                "x-visible-when": {"mode": "recurring"},
             },
-            "timezone": {"type": "string", "title": "Timezone", "default": "UTC"},
+            "timezone": {
+                "type": "string",
+                "title": "Timezone",
+                "default": "UTC",
+                "x-visible-when": {"mode": "recurring"},
+            },
         },
-        "required": ["cron_expression"],
+        "required": ["mode"],
     },
-    icon="clock",
+    icon="play",
 )
-def execute_schedule_trigger(session, config, input_data, **kwargs):
+def execute_trigger(session, config, input_data, **kwargs):
+    mode = config.get("mode", "manual")
+    if mode == "manual":
+        return {"trigger": kwargs.get("trigger_data", {})}
+    if mode == "once":
+        return {"trigger": {"scheduled_at": config.get("run_at") or datetime.now(UTC).isoformat()}}
     return {"trigger": {"scheduled_at": datetime.now(UTC).isoformat()}}
 
 

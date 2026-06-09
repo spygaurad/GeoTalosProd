@@ -201,6 +201,13 @@ def _dispatch_ready_downstream(session, run, graph, completed_node_id: str):
     from app.automation.engine import get_downstream_node_ids, get_upstream_edges
     from app.models.automation import AutomationRunStep
 
+    # WorkerSession is configured with expire_on_commit=False, so step
+    # instances already in this session's identity map (loaded at task start)
+    # would shadow concurrent commits from sibling workers. Expire them so
+    # the query below re-reads each row's status from the DB — without this
+    # the dispatcher misses run_inference when two roots finish in parallel.
+    session.expire_all()
+
     downstream_ids = get_downstream_node_ids(graph, completed_node_id)
     all_steps = {s.node_id: s for s in session.query(AutomationRunStep).filter_by(run_id=run.id).all()}
 
@@ -274,8 +281,12 @@ def resume_after_job(job_id: str, output_data: dict | None = None) -> None:
         step.completed_at = datetime.now(UTC).replace(tzinfo=None)
         step.waiting_for_job_id = None
         if step.started_at:
+            # `started_at` is reloaded from the DB (tz-aware) while
+            # `completed_at` is freshly set as naive UTC — coerce both to
+            # naive before subtracting to avoid a TypeError.
+            started_naive = step.started_at.replace(tzinfo=None) if step.started_at.tzinfo else step.started_at
             step.duration_ms = int(
-                (step.completed_at - step.started_at).total_seconds() * 1000
+                (step.completed_at - started_naive).total_seconds() * 1000
             )
         run.completed_steps += 1
         run.progress = run.completed_steps / run.total_steps if run.total_steps > 0 else 0

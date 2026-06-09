@@ -51,10 +51,8 @@ async def create_model(
     db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    if payload.organization_id != org_id:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
     service = AIModelService(db)
-    model = await service.create_model(payload)
+    model = await service.create_model(payload, organization_id=org_id)
     await log_audit_event(
         action="models.create",
         actor_id=str(current_user.id),

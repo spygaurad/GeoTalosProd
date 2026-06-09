@@ -271,4 +271,96 @@ def bulk_import_annotations(self, job_id: str) -> None:
             raise
 
 
-__all__ = ["bulk_import_annotations", "BULK"]
+def _gdal_env_for_worker() -> dict:
+    """rasterio Env options; credentials come from the worker env via boto3."""
+    from app.config import settings
+
+    endpoint = settings.AWS_ENDPOINT_URL.replace("http://", "").replace("https://", "")
+    return {
+        "AWS_S3_ENDPOINT": endpoint,
+        "AWS_HTTPS": "YES" if settings.AWS_ENDPOINT_URL.startswith("https://") else "NO",
+        "AWS_VIRTUAL_HOSTING": "FALSE",
+        "AWS_REGION": settings.AWS_REGION,
+        "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+        "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff",
+    }
+
+
+@celery_app.task(bind=True, queue=BULK, max_retries=2, default_retry_delay=60)
+def vectorize_raster_mask(self, job_id: str) -> None:
+    """Vectorize a raster-mask annotation set into a new vector set (async).
+
+    Dispatched onto the Redis-backed ``bulk`` queue. Reads ``job.config``:
+
+    ``source_set_id``     raster-mask annotation set to vectorize (required)
+    ``simplify_tolerance``/``min_area_px``/``connectivity``/``dissolve``/
+    ``confidence``/``out_name``  optional conversion knobs
+
+    On success, ``job.config['result']`` carries the new set id + class counts.
+    """
+    from app.services.conversion import vectorize_raster_mask_set
+
+    job_uuid = uuid.UUID(job_id)
+    with WorkerSession() as session:
+        job = session.get(Job, job_uuid)
+        if job is None:
+            logger.error("vectorize_raster_mask: job %s not found", job_id)
+            return
+        cfg = dict(job.config or {})
+        try:
+            job.status = JobStatus.RUNNING
+            job.started_at = _utcnow()
+            session.commit()
+
+            source_set_id = cfg.get("source_set_id")
+            if not source_set_id:
+                raise ValueError("job.config.source_set_id is required")
+            raster_set = session.get(AnnotationSet, uuid.UUID(str(source_set_id)))
+            if raster_set is None or raster_set.organization_id != job.organization_id:
+                raise ValueError("source annotation set not found in this organization")
+
+            result = vectorize_raster_mask_set(
+                session,
+                raster_set,
+                gdal_env=_gdal_env_for_worker(),
+                name=cfg.get("out_name"),
+                created_by_user_id=job.created_by_user_id,
+                simplify_tolerance=cfg.get("simplify_tolerance"),
+                min_area_px=float(cfg.get("min_area_px", 0.0)),
+                connectivity=int(cfg.get("connectivity", 4)),
+                dissolve_by_class=bool(cfg.get("dissolve", False)),
+                confidence=cfg.get("confidence", 1.0),
+            )
+
+            cfg["result"] = {
+                "annotation_set_id": str(result.annotation_set_id),
+                "feature_count": result.feature_count,
+                "class_counts": result.class_counts,
+            }
+            job.config = cfg
+            job.processed_items = result.feature_count
+            job.total_items = result.feature_count
+            job.progress = 1.0
+            job.status = JobStatus.COMPLETED
+            job.finished_at = _utcnow()
+            session.commit()
+            logger.info(
+                "vectorize_raster_mask done job=%s source=%s target=%s features=%d",
+                job_id, source_set_id, result.annotation_set_id, result.feature_count,
+            )
+        except Exception as exc:
+            session.rollback()
+            logger.exception("vectorize_raster_mask failed job=%s", job_id)
+            try:
+                job = session.get(Job, job_uuid)
+                if job is not None:
+                    job.status = JobStatus.FAILED
+                    job.logs = str(exc)[:4000]
+                    job.finished_at = _utcnow()
+                    session.commit()
+            except Exception:
+                logger.exception("could not mark job %s as failed", job_id)
+            raise
+
+
+__all__ = ["bulk_import_annotations", "vectorize_raster_mask", "BULK"]

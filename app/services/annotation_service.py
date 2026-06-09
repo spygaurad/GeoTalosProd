@@ -3,17 +3,19 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
+from shapely.geometry import box as shape_box
 from shapely.geometry import shape as shape_geom
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import bad_request, conflict, not_found
-from app.core.geometry import parse_geometry
+from app.core.geometry import parse_geometry, serialize_geometry
 from app.models.annotation import Annotation
 from app.models.annotation_class import AnnotationClass
 from app.models.annotation_schema import AnnotationSchema
 from app.models.annotation_set import AnnotationSet
+from app.models.map_aoi import MapAOI
 from app.schemas.annotation import AnnotationCreate, AnnotationCreateOnMap, AnnotationUpdate
 from app.services.annotation_set_service import AnnotationSetService, _set_in_org_clause
 
@@ -147,6 +149,8 @@ class AnnotationService:
         data["created_by_job_id"] = created_by_job_id
         annotation = Annotation(**data)
         self.db.add(annotation)
+        if created_by_user_id is not None:
+            AnnotationSetService(self.db).mark_corrected_if_model(annotation_set)
         try:
             await self.db.commit()
         except IntegrityError as exc:
@@ -239,6 +243,14 @@ class AnnotationService:
         for key, value in data.items():
             setattr(annotation, key, value)
 
+        # Editing an annotation is always a human action here (jobs write
+        # annotations directly, not via this service), so a model set becomes
+        # 'corrected'.
+        annotation_set = await self._get_set_for_org(
+            annotation.annotation_set_id, organization_id
+        )
+        AnnotationSetService(self.db).mark_corrected_if_model(annotation_set)
+
         try:
             await self.db.commit()
         except IntegrityError as exc:
@@ -247,9 +259,117 @@ class AnnotationService:
         await self.db.refresh(annotation)
         return annotation
 
+    async def _resolve_aoi_for_geometry(
+        self, map_id: UUID, organization_id: UUID, geometry: object
+    ) -> dict | None:
+        """Find which AOI on the map spatially contains an annotation, if any.
+
+        Returns soft ``{aoi_id, aoi_name}`` provenance to stamp onto the verified
+        annotation — purely informational, so deleting the AOI later never
+        affects the verified data. Falls back to the AOI bbox when it has no
+        explicit geometry. Returns ``None`` when nothing contains the point.
+        """
+        rows = await self.db.scalars(
+            select(MapAOI).where(
+                MapAOI.map_id == map_id,
+                MapAOI.organization_id == organization_id,
+                MapAOI.deleted_at.is_(None),
+            )
+        )
+        aois = rows.all()
+        if not aois:
+            return None
+        try:
+            point = shape_geom(serialize_geometry(geometry)).representative_point()
+        except Exception:
+            return None
+        for aoi in aois:
+            try:
+                if isinstance(aoi.geometry, dict) and aoi.geometry:
+                    poly = shape_geom(aoi.geometry)
+                elif isinstance(aoi.bbox_4326, (list, tuple)) and len(aoi.bbox_4326) == 4:
+                    poly = shape_box(*[float(v) for v in aoi.bbox_4326])
+                else:
+                    continue
+                if poly.contains(point) or poly.intersects(point):
+                    return {"aoi_id": str(aoi.id), "aoi_name": aoi.name}
+            except Exception:
+                continue
+        return None
+
+    async def verify_annotation(
+        self,
+        annotation_id: UUID,
+        organization_id: UUID,
+        *,
+        map_id: UUID,
+        user_id: UUID,
+        user_clerk_id: str,
+        set_id: UUID | None = None,
+    ) -> tuple[Annotation, AnnotationSet, UUID, bool]:
+        """Promote an annotation into the map's human-verified set.
+
+        Finds-or-creates the single ``(map, schema)`` verified set, stamps soft
+        AOI provenance + review metadata onto the annotation, then moves it out
+        of its source (model/raw) set. The DB extent triggers keep both sets'
+        envelopes correct after the move.
+        """
+        annotation = await self.get_annotation(annotation_id, organization_id, set_id=set_id)
+        source_set = await self._get_set_for_org(
+            annotation.annotation_set_id, organization_id
+        )
+        source_set_id = source_set.id
+        if source_set.schema_id is None:
+            raise bad_request("Cannot verify an annotation whose set has no schema")
+
+        schema_name = await self.db.scalar(
+            select(AnnotationSchema.name).where(AnnotationSchema.id == source_set.schema_id)
+        )
+
+        set_service = AnnotationSetService(self.db)
+        verified_set, created = await set_service.ensure_verified_set(
+            map_id=map_id,
+            organization_id=organization_id,
+            schema_id=source_set.schema_id,
+            created_by_user_id=user_id,
+            dataset_id=source_set.dataset_id,
+            schema_name=schema_name,
+        )
+
+        if annotation.annotation_set_id == verified_set.id:
+            # Already verified — nothing to move, return as-is.
+            return annotation, verified_set, source_set_id, created
+
+        aoi_meta = await self._resolve_aoi_for_geometry(
+            map_id, organization_id, annotation.geometry
+        )
+        props = dict(annotation.properties or {})
+        props["review_status"] = "verified"
+        # Store the Clerk id (not the internal DB user UUID) so the frontend,
+        # which only knows the Clerk id, can resolve "You" vs "Another user".
+        props["verified_by_user_id"] = user_clerk_id
+        props["verified_from_set_id"] = str(source_set_id)
+        if aoi_meta is not None:
+            props["aoi_id"] = aoi_meta["aoi_id"]
+            props["aoi_name"] = aoi_meta["aoi_name"]
+        annotation.properties = props
+        annotation.annotation_set_id = verified_set.id
+
+        try:
+            await self.db.commit()
+        except IntegrityError as exc:
+            await self.db.rollback()
+            raise conflict("Annotation verify violates constraints") from exc
+        await self.db.refresh(annotation)
+        return annotation, verified_set, source_set_id, created
+
     async def delete_annotation(
         self, annotation_id: UUID, organization_id: UUID, set_id: UUID | None = None
     ) -> None:
         annotation = await self.get_annotation(annotation_id, organization_id, set_id=set_id)
         annotation.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+        annotation_set = await self._get_set_for_org(
+            annotation.annotation_set_id, organization_id
+        )
+        AnnotationSetService(self.db).mark_corrected_if_model(annotation_set)
         await self.db.commit()

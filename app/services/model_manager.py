@@ -18,6 +18,7 @@ Flow per Job:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -37,7 +38,10 @@ from app.core.enums import JobStatus
 from app.core.geometry import parse_geometry
 from app.models.ai_model import AIModel
 from app.models.annotation import Annotation
+from app.models.annotation_class import AnnotationClass
 from app.models.annotation_set import AnnotationSet
+from app.models.annotation_schema import AnnotationSchema
+from app.models.dataset import Dataset
 from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.models.job_output import JobOutput
@@ -47,6 +51,7 @@ from app.models.model_class_mapping import ModelClassMapping
 from app.models.project import Project
 from app.models.project_annotation_set import ProjectAnnotationSet
 from app.services.patch_service import PatchService
+from app.services.titiler_service import _rendering_params_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +61,19 @@ class InferenceResult:
     processed_items: int
     failed_items: int
     output_set_ids: list[UUID]
+
+
+@dataclass
+class _ResolvedClassMapping:
+    """Duck-typed stand-in for ModelClassMapping used by run_job.
+
+    Lets us return either real ``ModelClassMapping`` rows or transient mappings
+    derived on the fly from ``adapter_config.category_map`` without writing
+    anything to the database.
+    """
+
+    annotation_class_id: UUID
+    confidence_threshold: float | None
 
 
 class ModelManager:
@@ -181,12 +199,31 @@ class ModelManager:
             "skip_item": False,
         }
 
+    def _resolve_rendering_config(self, item: DatasetItem) -> dict | None:
+        """Pick the rendering_config that defines this item's display params.
+
+        Item-level overrides win (set during ingestion); otherwise we fall back
+        to the parent dataset's metadata. Without one, int16/uint16 rasters
+        return HTTP 500 from TiTiler's PNG encoder.
+        """
+        props = item.properties_cache or {}
+        item_rc = props.get("rendering_config")
+        if isinstance(item_rc, dict) and item_rc:
+            return item_rc
+        dataset = self.session.get(Dataset, item.dataset_id)
+        if dataset is None:
+            return None
+        ds_md = getattr(dataset, "metadata_", None) or {}
+        ds_rc = ds_md.get("rendering_config")
+        return ds_rc if isinstance(ds_rc, dict) and ds_rc else None
+
     def _fetch_patch_png(
         self,
         *,
         item: DatasetItem,
         patch: dict[str, Any],
         asset_name: str = "data",
+        override_params: dict[str, str] | None = None,
     ) -> str:
         """Fetch patch PNG bytes from TiTiler and return base64 payload."""
         bbox = patch.get("bbox")
@@ -205,8 +242,36 @@ class ModelManager:
             f"{base_url}/collections/{item.stac_collection_id}"
             f"/items/{item.stac_item_id}/bbox/{bbox_csv}/{dim_part}"
         )
-        query = parse.urlencode({"assets": asset_name})
-        crop_url = f"{endpoint}?{query}"
+        # Param precedence (later wins):
+        # 1. dataset's stored rendering_config preset (asset_bidx + rescale baked at ingestion)
+        # 2. caller-supplied override_params (UI band selection / rescale chosen for THIS run)
+        # 3. bare ``assets`` fallback if neither produced an asset selector
+        params: dict[str, str] = {}
+        rendering_config = self._resolve_rendering_config(item)
+        preset_params = _rendering_params_from_config(rendering_config)
+        if preset_params:
+            params.update(preset_params)
+        if override_params:
+            params.update({k: str(v) for k, v in override_params.items() if v is not None})
+        # TiTiler's /bbox/ endpoint requires `assets` to be set even when
+        # `asset_bidx` is also present (it doesn't infer one from the other).
+        if "assets" not in params:
+            asset_bidx = params.get("asset_bidx", "")
+            if "|" in asset_bidx:
+                params["assets"] = asset_bidx.split("|", 1)[0]
+            else:
+                params["assets"] = asset_name
+        # Drop colormap when the final asset selection is multi-band — TiTiler
+        # 400s on the combination ("colormap can only be applied to 1-band data").
+        # This happens when the dataset's default single-band preset (e.g.
+        # colormap_name=gray) gets layered with the UI's RGB band selection.
+        asset_bidx = params.get("asset_bidx", "")
+        bands_part = asset_bidx.split("|", 1)[1] if "|" in asset_bidx else asset_bidx
+        band_count = sum(1 for b in bands_part.split(",") if b.strip())
+        if band_count > 1:
+            params.pop("colormap_name", None)
+            params.pop("colormap", None)
+        crop_url = f"{endpoint}?{parse.urlencode(params)}"
 
         req = request.Request(crop_url, method="GET")
         with request.urlopen(req, timeout=60.0) as resp:  # nosec B310
@@ -269,15 +334,77 @@ class ModelManager:
             raw = resp.read().decode("utf-8")
             return json.loads(raw)
 
-    def _resolve_class_mapping(self, model_id: UUID) -> dict[str, ModelClassMapping]:
+    def _resolve_class_mapping(self, model: AIModel) -> dict[str, _ResolvedClassMapping]:
+        """Resolve model output labels -> annotation_class_id, with two paths.
+
+        1. Explicit rows in ``model_class_mappings`` win when present.
+        2. Otherwise, fall back to ``adapter_config.category_map`` values, looked
+           up by name against ``annotation_classes`` of ``model.annotation_schema_id``.
+           Threshold defaults to ``adapter_config.min_score`` if set.
+        """
         rows = (
             self.session.execute(
-                select(ModelClassMapping).where(ModelClassMapping.model_id == model_id)
+                select(ModelClassMapping).where(ModelClassMapping.model_id == model.id)
             )
             .scalars()
             .all()
         )
-        return {row.model_label: row for row in rows}
+        if rows:
+            return {
+                row.model_label: _ResolvedClassMapping(
+                    annotation_class_id=row.annotation_class_id,
+                    confidence_threshold=row.confidence_threshold,
+                )
+                for row in rows
+            }
+
+        adapter_config = ((model.output_config or {}).get("adapter_config") or {})
+        category_map = adapter_config.get("category_map")
+        if not isinstance(category_map, dict) or model.annotation_schema_id is None:
+            return {}
+
+        labels: list[str] = []
+        for value in category_map.values():
+            if isinstance(value, str) and value.strip():
+                labels.append(value.strip())
+        if not labels:
+            return {}
+
+        class_rows = (
+            self.session.execute(
+                select(AnnotationClass).where(
+                    AnnotationClass.schema_id == model.annotation_schema_id,
+                    AnnotationClass.name.in_(labels),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_name = {row.name: row for row in class_rows}
+
+        threshold_cfg = adapter_config.get("min_score")
+        threshold: float | None
+        try:
+            threshold = float(threshold_cfg) if threshold_cfg is not None else None
+        except (TypeError, ValueError):
+            threshold = None
+
+        derived: dict[str, _ResolvedClassMapping] = {}
+        for label in labels:
+            cls = by_name.get(label)
+            if cls is None:
+                logger.warning(
+                    "category_map label has no matching annotation_class model_id=%s schema_id=%s label=%s",
+                    model.id,
+                    model.annotation_schema_id,
+                    label,
+                )
+                continue
+            derived[label] = _ResolvedClassMapping(
+                annotation_class_id=cls.id,
+                confidence_threshold=threshold,
+            )
+        return derived
 
     def _validate_geojson_4326(self, geom: dict[str, Any]) -> dict[str, Any]:
         shp = shape(geom)
@@ -295,7 +422,7 @@ class ModelManager:
         if not item_ids:
             raise ValueError("No dataset_item inputs found in job")
 
-        mapping_by_label = self._resolve_class_mapping(model.id)
+        mapping_by_label = self._resolve_class_mapping(model)
         output_cfg = dict(model.output_config or {})
         run_cfg = (job.config or {}).get("run_output_config")
         if isinstance(run_cfg, dict):
@@ -305,6 +432,39 @@ class ModelManager:
         adapter_config = output_cfg.get("adapter_config") or {}
         adapter = get_adapter(adapter_name)
         prompt_payload = output_cfg.get("prompt_payload") or {}
+
+        # When set, every prediction is force-assigned to this annotation class
+        # regardless of what label the adapter emits. Used by prompted models
+        # (SAM3 text) where the user explicitly picks the class and the prompt
+        # is just a hint to the endpoint.
+        force_class_raw = output_cfg.get("output_class_id")
+        force_class_id: UUID | None
+        try:
+            force_class_id = UUID(force_class_raw) if force_class_raw else None
+        except (TypeError, ValueError):
+            force_class_id = None
+
+        # Caller-supplied TiTiler params (band selection + rescale from the UI).
+        # Layered on top of the dataset's stored preset inside _fetch_patch_png.
+        raw_render_params = output_cfg.get("render_params")
+        render_params: dict[str, str] | None
+        if isinstance(raw_render_params, dict) and raw_render_params:
+            render_params = {str(k): str(v) for k, v in raw_render_params.items() if v is not None}
+        else:
+            render_params = None
+
+        # Optional translation table for model-emitted labels -> schema class
+        # names. Used when the underlying weights file uses a different class
+        # naming convention than the platform schema (e.g. YOLO's data.yaml
+        # has "item" but the schema class is "Palm Tree"). Applied before
+        # auto-bind so the existing matching path doesn't have to special-case.
+        raw_label_map = output_cfg.get("label_map")
+        label_map: dict[str, str] = {}
+        if isinstance(raw_label_map, dict):
+            label_map = {
+                str(k): str(v) for k, v in raw_label_map.items()
+                if isinstance(k, str) and isinstance(v, str) and v.strip()
+            }
 
         project_id = output_cfg.get("project_id")
         map_id = output_cfg.get("map_id")
@@ -317,6 +477,13 @@ class ModelManager:
             "framework": model.framework,
             "adapter": adapter_name,
         }
+
+        # Resolve the schema name once so each output set gets a readable
+        # "<base> · <schema> · <NNNN>" name instead of a raw STAC item id.
+        schema_name: str | None = None
+        if model.annotation_schema_id is not None:
+            schema = self.session.get(AnnotationSchema, model.annotation_schema_id)
+            schema_name = schema.name if schema else None
 
         processed = 0
         failed = 0
@@ -358,6 +525,22 @@ class ModelManager:
                     self.session.commit()
                     continue
 
+                # Build a readable name: "<base> · <schema> · <hash>".
+                # `base_name` comes from the Run Inference automation node, else
+                # the model name. The 4-char hash is a stable digest of the STAC
+                # item id, so the same item always gets the same suffix across
+                # re-runs — disambiguating the per-item sets a run fans out
+                # without leaking the raw id.
+                base_name = output_cfg.get("annotation_set_name") or model.name
+                item_hash = hashlib.blake2s(
+                    item.stac_item_id.encode(), digest_size=2
+                ).hexdigest()
+                name_parts = [base_name]
+                if schema_name:
+                    name_parts.append(schema_name)
+                name_parts.append(item_hash)
+                set_name = " · ".join(name_parts)
+                item_label = item.filename or item.stac_item_id
                 annotation_set = AnnotationSet(
                     organization_id=job.organization_id,
                     schema_id=model.annotation_schema_id,
@@ -366,11 +549,14 @@ class ModelManager:
                     source_type="model",
                     model_id=model.id,
                     job_id=job.id,
-                    name=f"{model.name}::{item.stac_item_id}",
-                    description=f"Model inference output for item {item.stac_item_id}",
+                    name=set_name,
+                    description=f"Model inference output for {item_label}",
                 )
                 self.session.add(annotation_set)
                 self.session.flush()
+
+                from app.services.annotation_set_grouping import ensure_schema_collection_sync
+                ensure_schema_collection_sync(self.session, annotation_set)
 
                 if project_id:
                     project = self.session.get(Project, UUID(project_id))
@@ -412,11 +598,26 @@ class ModelManager:
                         "effective_aoi_bbox": aoi_state["effective_bbox"],
                         "used_full_item": aoi_state["used_full_item"],
                     }
+                    # Resolve the prompt for THIS patch. Adapters with a
+                    # prompt_resolver (e.g. SAM3 bbox exemplars) reproject the
+                    # static spec into patch-pixel space and may return None to
+                    # skip patches a spatial prompt doesn't overlap. Without a
+                    # resolver the static prompt is sent to every patch as before.
+                    if adapter.prompt_resolver is not None:
+                        patch_prompt_payload = adapter.prompt_resolver(
+                            prompt_payload, patch_context, adapter_config
+                        )
+                        if patch_prompt_payload is None:
+                            continue
+                    else:
+                        patch_prompt_payload = prompt_payload
+
                     try:
                         patch_png_b64 = self._fetch_patch_png(
                             item=item,
                             patch=patch,
                             asset_name=patch_asset,
+                            override_params=render_params,
                         )
                         raw_output = self._call_model(
                             model=model,
@@ -426,7 +627,7 @@ class ModelManager:
                             patch_image_base64=patch_png_b64,
                             adapter=adapter,
                             adapter_config=adapter_config,
-                            prompt_payload=prompt_payload,
+                            prompt_payload=patch_prompt_payload,
                         )
                         normalized = adapter.convert_fn(raw_output, adapter_config, patch_context)
                         predictions = normalized.get("predictions") or []
@@ -441,16 +642,40 @@ class ModelManager:
                         continue
 
                     for pred in predictions:
-                        label = str(pred.get("label", ""))
-                        mapping = mapping_by_label.get(label)
-                        if mapping is None:
-                            continue
+                        raw_label = str(pred.get("label", ""))
+                        # Apply caller-defined remapping (model label -> schema label)
+                        # so model-internal naming (e.g. YOLO "item") can be
+                        # routed to the user's schema class without renaming
+                        # the schema or retraining the model.
+                        label = label_map.get(raw_label, raw_label)
                         confidence = float(pred.get("confidence", 1.0) or 1.0)
-                        if (
-                            mapping.confidence_threshold is not None
-                            and confidence < mapping.confidence_threshold
-                        ):
-                            continue
+                        if force_class_id is not None:
+                            # SAM3-style flow: the user picked the class explicitly,
+                            # so we bypass label-matching entirely.
+                            target_class_id = force_class_id
+                        else:
+                            mapping = mapping_by_label.get(label)
+                            if mapping is None:
+                                # Most common cause of "0 annotations created":
+                                # the model's emitted label doesn't match any
+                                # category_map value / schema class name.
+                                # Logged at WARNING so it shows up without a
+                                # log-level tweak.
+                                logger.warning(
+                                    "inference_label_unmapped job_id=%s model_id=%s "
+                                    "emitted_label=%r known_labels=%s",
+                                    job.id,
+                                    model.id,
+                                    label,
+                                    sorted(mapping_by_label.keys()),
+                                )
+                                continue
+                            if (
+                                mapping.confidence_threshold is not None
+                                and confidence < mapping.confidence_threshold
+                            ):
+                                continue
+                            target_class_id = mapping.annotation_class_id
                         geom = pred.get("geometry")
                         if not isinstance(geom, dict):
                             continue
@@ -467,7 +692,7 @@ class ModelManager:
                         self.session.add(
                             Annotation(
                                 annotation_set_id=annotation_set.id,
-                                class_id=mapping.annotation_class_id,
+                                class_id=target_class_id,
                                 geometry=parse_geometry(geom_4326),
                                 confidence=confidence,
                                 properties=properties,

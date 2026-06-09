@@ -53,12 +53,17 @@ def run_inference_batch(self, job_id: str) -> None:
             manager = ModelManager(session)
             result = manager.run_job(job)
 
+            annotation_set_ids = [str(s) for s in result.output_set_ids]
             output_data = {
-                "predictions": {
+                "annotation_set": {
                     "job_id": str(job.id),
                     "model_id": str(job.model_id) if job.model_id else None,
                     "model_name": job.model.name if getattr(job, "model", None) else None,
-                    "annotation_set_ids": [str(s) for s in result.output_set_ids],
+                    # Single canonical id for downstream nodes that take one set;
+                    # the full list lets multi-set consumers (Overlay on Map,
+                    # comparison/aggregate) iterate every per-item set.
+                    "id": annotation_set_ids[0] if annotation_set_ids else None,
+                    "annotation_set_ids": annotation_set_ids,
                     "processed_items": result.processed_items,
                     "failed_items": result.failed_items,
                 }

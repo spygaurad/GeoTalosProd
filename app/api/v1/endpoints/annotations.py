@@ -13,6 +13,8 @@ from app.schemas.annotation import (
     AnnotationListResponse,
     AnnotationRead,
     AnnotationUpdate,
+    AnnotationVerifyRequest,
+    AnnotationVerifyResponse,
 )
 from app.services.annotation_service import AnnotationService
 
@@ -98,6 +100,40 @@ async def update_annotation(
         session=db,
     )
     return annotation
+
+
+@router.post("/{annotation_id}/verify", response_model=AnnotationVerifyResponse)
+async def verify_annotation(
+    set_id: UUID,
+    annotation_id: UUID,
+    payload: AnnotationVerifyRequest,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    service = AnnotationService(db)
+    annotation, verified_set, source_set_id, created = await service.verify_annotation(
+        annotation_id,
+        organization_id=org_id,
+        map_id=payload.map_id,
+        user_id=current_user.id,
+        user_clerk_id=current_user.clerk_id,
+        set_id=set_id,
+    )
+    await log_audit_event(
+        action="annotations.verify",
+        actor_id=str(current_user.id),
+        organization_id=str(org_id),
+        entity="annotation",
+        entity_id=str(annotation_id),
+        session=db,
+    )
+    return AnnotationVerifyResponse(
+        annotation=annotation,
+        verified_set_id=verified_set.id,
+        source_set_id=source_set_id,
+        verified_set_created=created,
+    )
 
 
 @router.delete("/{annotation_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -13,7 +13,7 @@ def validate_config(node_type: str, config: dict) -> list[str]:
     validators = {
         "run_inference": _validate_run_inference,
         "iou_threshold_gate": _validate_iou_gate,
-        "schedule_trigger": _validate_schedule,
+        "trigger": _validate_trigger,
     }
     validator = validators.get(node_type)
     if validator:
@@ -38,12 +38,16 @@ def _validate_iou_gate(config: dict) -> list[str]:
     return errors
 
 
-def _validate_schedule(config: dict) -> list[str]:
+def _validate_trigger(config: dict) -> list[str]:
     errors = []
-    cron = config.get("cron_expression")
-    if cron:
-        parts = cron.split()
-        if len(parts) != 5:
+    mode = config.get("mode", "manual")
+    if mode == "recurring":
+        cron = config.get("cron_expression")
+        if not cron:
+            errors.append("cron_expression is required for a recurring trigger")
+        elif len(cron.split()) != 5:
             errors.append("cron_expression must have exactly 5 fields (minute hour day month weekday)")
+    elif mode == "once" and not config.get("run_at"):
+        errors.append("run_at is required for a one-off trigger")
     return errors
 

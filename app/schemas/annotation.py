@@ -53,4 +53,21 @@ class AnnotationRead(ORMModel):
         return serialize_geometry(value)
 
 
+class AnnotationVerifyRequest(ORMModel):
+    """Promote a single annotation into the map's human-verified set.
+
+    ``map_id`` identifies which map's verified set the annotation moves into —
+    the verified set is found-or-created per (map, schema).
+    """
+
+    map_id: UUID
+
+
+class AnnotationVerifyResponse(ORMModel):
+    annotation: AnnotationRead
+    verified_set_id: UUID
+    source_set_id: UUID
+    verified_set_created: bool
+
+
 AnnotationListResponse = PaginatedResponse[AnnotationRead]

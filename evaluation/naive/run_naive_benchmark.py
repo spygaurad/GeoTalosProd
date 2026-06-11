@@ -93,6 +93,8 @@ def main() -> None:
     ap.add_argument("--data-dir", required=True, help="dir holding the staged COG")
     ap.add_argument("--cache", action="store_true",
                     help="read the AOI once and reuse across passes (defeats the ablation)")
+    ap.add_argument("--streaming", action="store_true",
+                    help="read one tile at a time (careful script); never hold the whole scene")
     ap.add_argument("--warmup", action="store_true", help="discard this run (weight/CUDA init)")
     ap.add_argument("--out", default=_RESULTS)
     args = ap.parse_args()
@@ -123,27 +125,44 @@ def main() -> None:
     features = []
     cached = {}  # aoi -> (window, tiles) when --cache
 
+    read_time = [0.0]
+
+    def _timed_read(ds, w):
+        s = time.time(); r = _read_rgb_window(ds, w); read_time[0] += time.time() - s
+        return r
+
     for aoi, bbox, pg in passes:
         with rasterio.open(cog_path) as ds:
-            if args.cache and aoi in cached:
-                win, tiles = cached[aoi]
+            win = (Window(0, 0, ds.width, ds.height) if bbox is None
+                   else _aoi_pixel_window(ds, bbox))
+            wox, woy = int(win.col_off), int(win.row_off)
+            offsets = _tile_offsets(int(win.width), int(win.height),
+                                    P["patch_size_px"], P["stride_px"])[:P["max_patches"]]
+
+            if args.streaming:
+                # STREAMING: read one tile at a time from disk; never hold the whole
+                # scene, no cache. Memory stays at ~one tile + model.
+                def _src():
+                    for ox, oy in offsets:
+                        ax, ay = wox + ox, woy + oy
+                        tw = Window(ax, ay, min(P["patch_size_px"], ds.width - ax),
+                                    min(P["patch_size_px"], ds.height - ay))
+                        yield ax, ay, _timed_read(ds, tw)
+                tile_src = _src()
+                data_loads += 1
+            elif args.cache and aoi in cached:
+                tile_src = cached[aoi]
             else:
-                t_load = time.time()
-                win = (Window(0, 0, ds.width, ds.height) if bbox is None
-                       else _aoi_pixel_window(ds, bbox))
-                region = _read_rgb_window(ds, win)          # whole region into RAM (the naive cost)
-                offsets = _tile_offsets(region.shape[1], region.shape[0],
-                                        P["patch_size_px"], P["stride_px"])
-                offsets = offsets[:P["max_patches"]]        # match platform's patch cap
-                tiles = [(ox, oy, region[oy:oy + P["patch_size_px"],
-                                         ox:ox + P["patch_size_px"]]) for ox, oy in offsets]
-                data_load_s += time.time() - t_load
+                # MONOLITHIC: whole region into RAM, then slice (the obvious script)
+                region = _timed_read(ds, win)
+                tile_src = [(wox + ox, woy + oy, region[oy:oy + P["patch_size_px"],
+                                                        ox:ox + P["patch_size_px"]])
+                            for ox, oy in offsets]
                 data_loads += 1
                 if args.cache:
-                    cached[aoi] = (win, tiles)
+                    tile_src = cached[aoi] = list(tile_src)
 
-            win_off_x, win_off_y = int(win.col_off), int(win.row_off)
-            for ox, oy, tile in tiles:
+            for ax, ay, tile in tile_src:
                 if tile.shape[0] < 8 or tile.shape[1] < 8:
                     continue
                 if runner_name == "sam3":
@@ -152,7 +171,7 @@ def main() -> None:
                     instances = runner(tile, conf=P["conf"], iou=P["iou"])
                 model_runs += 1
                 for inst in instances:
-                    geom = _georef_instance(ds, inst, win_off_x + ox, win_off_y + oy)
+                    geom = _georef_instance(ds, inst, ax, ay)
                     if geom is None:
                         continue
                     features.append({
@@ -160,6 +179,7 @@ def main() -> None:
                         "properties": {"label": inst["label"], "score": inst["score"],
                                        "aoi": aoi, "prompt": pg},
                     })
+    data_load_s = read_time[0]
 
     end_to_end_s = time.time() - t0
     res = sampler.stop()
@@ -174,9 +194,11 @@ def main() -> None:
     with open(geojson_path, "w") as f:
         json.dump({"type": "FeatureCollection", "features": features}, f)
 
+    mode = "streaming" if args.streaming else ("cache" if args.cache else "monolithic")
     row = {
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "environment": f"HPC:{args.gpu_label}" if args.gpu_label else "naive",
+        "mode": mode,
         "task": args.task,
         "task_label": task["label"],
         "dataset": task["dataset_name"],

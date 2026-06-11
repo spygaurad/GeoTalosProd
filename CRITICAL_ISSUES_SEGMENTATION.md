@@ -1,6 +1,6 @@
 # Segmentation Mask Implementation — Critical Issues Analysis
 
-**Status:** AwakeForest feature/setup_basemap_martin branch  
+**Status:** GeoTalos feature/setup_basemap_martin branch  
 **Date:** 2026-04-15  
 **Focus:** Ingestion → Annotation Sets → TiTiler Streaming
 

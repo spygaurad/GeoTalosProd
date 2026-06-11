@@ -29,8 +29,11 @@ INFRA = {
     "db_user": "postgres",
     "minio_container": "awakeforest-minio",
     "minio_alias": "loc",   # http://localhost:9000 (minioadmin / minioadmin_pass)
-    # containers worth sampling for the Application row (orchestration side)
-    "sample_containers": ["awakeforest-worker-inference", "awakeforest-api"],
+    # containers worth sampling for the Application row (orchestration side).
+    # titiler does the heavy CPU work (COG reads + PNG patch generation + block cache);
+    # worker-inference orchestrates; app-db/minio persist; api fronts it.
+    "sample_containers": ["awakeforest-worker-inference", "awakeforest-titiler",
+                          "awakeforest-app-db", "awakeforest-minio", "awakeforest-api"],
     "bucket": "org-7edefdc7-ebc2-4bf4-bff9-89dedbcee5bc",
 }
 

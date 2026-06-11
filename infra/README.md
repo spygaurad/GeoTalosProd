@@ -1,4 +1,4 @@
-# AwakeForest Infrastructure
+# GeoTalos Infrastructure
 
 ## PostgreSQL Major-Version Data Migration
 

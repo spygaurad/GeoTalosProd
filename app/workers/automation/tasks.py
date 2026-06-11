@@ -343,3 +343,10 @@ def trigger_scheduled_pipeline(pipeline_id: str) -> None:
 
         for step in steps:
             execute_step.delay(str(run.id), str(step.id))
+
+        # One-off "Run At" schedules fire once, then pause themselves. Cron has
+        # no year field so Beat would otherwise re-fire annually; pausing makes
+        # the next fire a no-op (guarded by the status check at the top).
+        if (pipeline.trigger_config or {}).get("run_once"):
+            pipeline.status = "paused"
+            session.commit()

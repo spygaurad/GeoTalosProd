@@ -101,6 +101,7 @@ class TriggerConfig(BaseModel):
     # schedule trigger
     cron_expression: str | None = None   # e.g., "0 9 * * 1" (Mondays at 9am)
     timezone: str | None = "UTC"
+    run_once: bool | None = None         # one-off "Run At": pause the pipeline after its first scheduled fire
     # event trigger
     event_type: str | None = None        # e.g., "dataset.ingested", "annotation.created"
     event_filters: dict[str, Any] | None = None  # e.g., { "dataset_id": "..." }

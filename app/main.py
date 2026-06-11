@@ -82,7 +82,7 @@ async def _seed_dev_fixtures() -> None:
             )
 
 
-app = FastAPI(title="AwakeForest API", lifespan=lifespan)
+app = FastAPI(title="GeoTalos API", lifespan=lifespan)
 
 # Middleware stack — Starlette processes add_middleware in reverse insertion order,
 # so the LAST add_middleware call becomes the OUTERMOST layer.

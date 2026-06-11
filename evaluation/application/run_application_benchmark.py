@@ -148,6 +148,8 @@ def _print_summary(row: dict) -> None:
         print(f"  GPU                : {', '.join(res['gpu_names']) or '-'}")
         print(f"  peak GPU mem       : {res['peak_gpu_mem_mib']:.0f} MiB "
               f"(util {res['peak_gpu_util_pct']:.0f}%)")
+        print(f"  PLATFORM peak CPU  : {res.get('peak_total_cpu_pct', 0):.0f}%  "
+              f"RAM {res.get('peak_total_mem_mib', 0)/1024:.2f} GB  (summed across containers)")
         for name, c in res["containers"].items():
             print(f"  {name:<26}: CPU {c['peak_cpu_pct']:.0f}%  RAM {c['peak_mem_mib']:.0f} MiB")
     else:

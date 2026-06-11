@@ -1,9 +1,9 @@
 # GeoTALOS Platform
 
 <p align="center">
-  <img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/spygaurad/AwakeForestProd">
-  <img alt="GitHub issues" src="https://img.shields.io/github/issues/spygaurad/AwakeForestProd">
-  <img alt="GitHub stars" src="https://img.shields.io/github/stars/spygaurad/AwakeForestProd?style=social">
+  <img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/spygaurad/GeoTalosProd">
+  <img alt="GitHub issues" src="https://img.shields.io/github/issues/spygaurad/GeoTalosProd">
+  <img alt="GitHub stars" src="https://img.shields.io/github/stars/spygaurad/GeoTalosProd?style=social">
 </p>
 
 <p align="center">

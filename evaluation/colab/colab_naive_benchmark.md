@@ -35,7 +35,7 @@ Colab can't reach lovelace directly, so stage through Google Drive.
 ```bash
 mkdir -p ~/colab_bench/models ~/colab_bench/data
 cp /home/prass25/projects/GreenMark/models/{sam3.pt,bpe_simple_vocab_16e6.txt.gz,yolo11x-ortho.pt,yolov11x-pose.pt} ~/colab_bench/models/
-cp /home/prass25/projects/AwakeForest/datasets/data/dataset_benchmark_cog/{FCAT1_cog.tif,JAMACOAQUE6_cog.tif,Kotsimba_corrected_cog.tif} ~/colab_bench/data/
+cp /home/prass25/projects/GeoTalos/datasets/data/dataset_benchmark_cog/{FCAT1_cog.tif,JAMACOAQUE6_cog.tif,Kotsimba_corrected_cog.tif} ~/colab_bench/data/
 du -sh ~/colab_bench/*        # ~3.5 GB models, ~4.9 GB data
 ```
 
@@ -82,7 +82,7 @@ drive.mount('/content/drive')
 
 ```python
 # Cell 2 — deps (match palm_api: ultralytics 8.3.237, torch is preinstalled on Colab)
-!pip -q install "ultralytics==8.3.237" rasterio opencv-python-headless pycocotools
+!pip -q install "ultralytics==8.3.237" rasterio opencv-python-headless pycocotools psutil
 import torch; print("torch", torch.__version__, "cuda", torch.cuda.is_available())
 ```
 
@@ -92,7 +92,7 @@ import torch; print("torch", torch.__version__, "cuda", torch.cuda.is_available(
 
 ```python
 # Cell 3 — naive runner: same weights, same 1024 tiling, same params as HPC rows
-import os, time, json, resource, subprocess, tempfile
+import os, time, json, resource, subprocess, tempfile, threading, psutil
 import numpy as np, cv2, torch, torchvision, rasterio
 from rasterio.windows import Window
 from rasterio.warp import transform as warp_transform
@@ -191,11 +191,30 @@ def run_sam3(patch, prompts):
     finally:
         os.path.exists(t) and os.unlink(t)
 
+class Sampler:
+    """Background thread: peak process CPU% (psutil) + peak GPU mem (nvidia-smi)."""
+    def __init__(self, interval=0.3):
+        self.interval=interval; self._stop=threading.Event()
+        self.peak_cpu=0.0; self.peak_gpu=0.0
+        self._p=psutil.Process(); self._p.cpu_percent(None)   # prime
+    def _loop(self):
+        while not self._stop.is_set():
+            try: self.peak_cpu=max(self.peak_cpu, self._p.cpu_percent(None))
+            except Exception: pass
+            g=subprocess.run(["nvidia-smi","--query-gpu=memory.used","--format=csv,noheader,nounits"],
+                             capture_output=True,text=True).stdout.strip().splitlines()
+            if g:
+                try: self.peak_gpu=max(self.peak_gpu, float(g[0]))
+                except Exception: pass
+            self._stop.wait(self.interval)
+    def start(self): self._t=threading.Thread(target=self._loop,daemon=True); self._t.start(); return self
+    def stop(self): self._stop.set(); self._t.join(timeout=3); return self
+
 def benchmark(task):
     cfg=TASKS[task]; path=f"{DATA}/{cfg['file']}"
     groups=cfg["prompts"] or [None]
+    smp=Sampler().start()
     t0=time.time(); load_s=0; loads=0; runs=0; feats=0
-    peak_gpu=[0.0]
     for pg in groups:                       # naive: re-read the whole scene per prompt
         with rasterio.open(path) as ds:
             tl=time.time()
@@ -213,15 +232,13 @@ def benchmark(task):
                 if tile.shape[0]<8 or tile.shape[1]<8: continue
                 inst = run_sam3(tile,pg) if cfg['kind']=='sam3' else run_yolo(tile, pose=(cfg['kind']=='crown'))
                 runs+=1; feats+=len(inst)
-                g=subprocess.run(["nvidia-smi","--query-gpu=memory.used","--format=csv,noheader,nounits"],
-                                 capture_output=True,text=True).stdout.strip().splitlines()
-                if g: peak_gpu[0]=max(peak_gpu[0],float(g[0]))
             del region
-    e2e=time.time()-t0
+    e2e=time.time()-t0; smp.stop()
     ram=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024  # MiB
     row=dict(environment="Colab", task=task, end_to_end_s=round(e2e,1),
              dataset_load_s=round(load_s,1), model_runs=runs, repeated_data_loads=loads,
-             features=feats, peak_ram_gb=round(ram/1024,1), peak_gpu_mib=round(peak_gpu[0]))
+             features=feats, peak_cpu_pct=round(smp.peak_cpu,1),
+             peak_ram_gb=round(ram/1024,1), peak_gpu_mib=round(smp.peak_gpu))
     print(json.dumps(row, indent=2))
     open("/content/colab_results.jsonl","a").write(json.dumps(row)+"\n")
     return row

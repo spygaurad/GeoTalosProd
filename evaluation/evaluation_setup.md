@@ -15,7 +15,7 @@ This README is the entry point. Pinned task parameters live in `task_spec.py`
 The system is two decoupled processes talking over HTTP:
 
 ```
-  AwakeForestProd (the "application", CPU-only, docker)      palm_api (model server, GPU)
+  GeoTalosProd (the "application", CPU-only, docker)      palm_api (model server, GPU)
   ┌───────────────────────────────────────┐                 ┌──────────────────────────┐
   │ automation engine (pipeline DAG)       │   HTTP /platform │ uvicorn :8012            │
   │ celery-worker-inference, postgres,     │ ───────────────► │ YOLO + SAM2 + SAM3       │
@@ -229,7 +229,7 @@ greenmark_model_venv/bin/python evaluation/build_tables.py > evaluation/results/
 ## 11. Quick full replay
 
 ```bash
-cd AwakeForestProd
+cd GeoTalosProd
 PY=/home/prass25/projects/greenmark_model_venv/bin/python
 export PYTHONPATH=$PWD
 

@@ -117,6 +117,8 @@ class ResourceSampler:
         self._gpu_names: dict[int, str] = {}
         self._peak_cpu: dict[str, float] = {}
         self._peak_mem: dict[str, float] = {}
+        self._peak_total_cpu = 0.0
+        self._peak_total_mem = 0.0
         self._samples = 0
 
     def _tick(self) -> None:
@@ -125,9 +127,17 @@ class ResourceSampler:
                 self._gpu_names[g["index"]] = g["name"]
                 self._peak_gpu_mem_mib = max(self._peak_gpu_mem_mib, g["mem_used_mib"])
                 self._peak_gpu_util = max(self._peak_gpu_util, g["util_pct"])
-        for name, s in _docker_stats(self.containers).items():
+        stats = _docker_stats(self.containers)
+        tick_cpu = 0.0
+        tick_mem = 0.0
+        for name, s in stats.items():
             self._peak_cpu[name] = max(self._peak_cpu.get(name, 0.0), s["cpu_pct"])
             self._peak_mem[name] = max(self._peak_mem.get(name, 0.0), s["mem_bytes"])
+            tick_cpu += s["cpu_pct"]
+            tick_mem += s["mem_bytes"]
+        # peak of the SUM across containers at one instant (true platform total)
+        self._peak_total_cpu = max(self._peak_total_cpu, tick_cpu)
+        self._peak_total_mem = max(self._peak_total_mem, tick_mem)
         if self._proc is not None:
             try:
                 self._peak_self_cpu = max(self._peak_self_cpu, self._proc.cpu_percent(None))
@@ -167,6 +177,8 @@ class ResourceSampler:
             "peak_gpu_util_pct": round(self._peak_gpu_util, 1),
             "peak_self_cpu_pct": round(self._peak_self_cpu, 1) if self.sample_self else None,
             "peak_self_rss_mib": peak_self_rss_mib,
+            "peak_total_cpu_pct": round(self._peak_total_cpu, 1),
+            "peak_total_mem_mib": round(self._peak_total_mem / 1024**2, 1),
             "containers": {
                 name: {
                     "peak_cpu_pct": round(self._peak_cpu.get(name, 0.0), 1),

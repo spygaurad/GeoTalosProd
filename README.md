@@ -1,4 +1,8 @@
-# GeoTALOS Platform
+<p align="center">
+  <img src="docs/assets/geotalos-logo.png" alt="GeoTALOS logo" width="140">
+</p>
+
+<h1 align="center">GeoTALOS Platform</h1>
 
 <p align="center">
   <img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/spygaurad/GeoTalosProd">
@@ -85,7 +89,15 @@
 
 ## Demo Video
 
-Demo video coming soon.
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=rIJ6yANrKfc">
+    <img src="https://img.youtube.com/vi/rIJ6yANrKfc/maxresdefault.jpg" alt="Watch the GeoTALOS demo video" width="720">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=rIJ6yANrKfc">Watch the GeoTALOS demo video</a>
+</p>
 
 ## Documentation
 

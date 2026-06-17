@@ -15,7 +15,8 @@
   <a href="docs/workflows.md">🧩 Workflows</a> •
   <a href="docs/architecture.md">🏗️ Architecture</a> •
   <a href="docs/setup.md">⚙️ Setup</a> •
-  <a href="docs/links/api-docs-link.md">🔌 API</a>
+  <a href="docs/links/api-docs-link.md">🔌 API</a> •
+  <a href="https://github.com/spygaurad/GeoTalosUI">🖥️ UI Repo</a>
 </p>
 
 ## Highlights
@@ -95,6 +96,10 @@ More documentation is available in the project docs:
 - [Workflows](docs/workflows.md)
 - [Setup Guide](docs/setup.md)
 - [Infrastructure Notes](infra/README.md)
+
+## Related Repositories
+
+- [GeoTALOS UI](https://github.com/spygaurad/GeoTalosUI) — frontend map workspace and visual workflow interface
 
 ## Quick Start
 

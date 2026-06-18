@@ -81,7 +81,7 @@
 
 ## Platform Overview
 
-![GeoTALOS overview placeholder](docs/assets/placeholder-overview.svg)
+![GeoTALOS platform overview](docs/assets/geotalos-platform-overview.png)
 
 ## Example Workflow
 
@@ -90,13 +90,13 @@
 ## Demo Video
 
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=rIJ6yANrKfc">
-    <img src="https://img.youtube.com/vi/rIJ6yANrKfc/maxresdefault.jpg" alt="Watch the GeoTALOS demo video" width="720">
+  <a href="https://www.youtube.com/watch?v=KoLlAJi2LYg">
+    <img src="https://img.youtube.com/vi/KoLlAJi2LYg/maxresdefault.jpg" alt="Watch the GeoTALOS demo video" width="720">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=rIJ6yANrKfc">Watch the GeoTALOS demo video</a>
+  <a href="https://www.youtube.com/watch?v=KoLlAJi2LYg">Watch the GeoTALOS demo video</a>
 </p>
 
 ## Documentation

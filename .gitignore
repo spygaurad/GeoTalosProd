@@ -19,3 +19,4 @@ combine_code.py.save
 
 *.png
 !docs/assets/geotalos-logo.png
+!docs/assets/geotalos-platform-overview.png

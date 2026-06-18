@@ -83,9 +83,17 @@
 
 ![GeoTALOS platform overview](docs/assets/geotalos-platform-overview.png)
 
+## Map Workspace
+
+![GeoTALOS map workspace](docs/assets/geotalos-map-workspace.png)
+
 ## Example Workflow
 
-![GeoTALOS workflow](docs/assets/fig2_sig.jpg)
+![GeoTALOS example workflow](docs/assets/geotalos-example-workflow.png)
+
+## Temporal Monitoring
+
+![GeoTALOS temporal monitoring workflow](docs/assets/geotalos-temporal-workflow.png)
 
 ## Demo Video
 

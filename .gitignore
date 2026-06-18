@@ -20,3 +20,6 @@ combine_code.py.save
 *.png
 !docs/assets/geotalos-logo.png
 !docs/assets/geotalos-platform-overview.png
+!docs/assets/geotalos-example-workflow.png
+!docs/assets/geotalos-map-workspace.png
+!docs/assets/geotalos-temporal-workflow.png

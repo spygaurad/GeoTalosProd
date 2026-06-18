@@ -1,13 +1,14 @@
-<p align="center">
-  <img src="docs/assets/geotalos-logo.png" alt="GeoTALOS logo" width="140">
-</p>
+<h1 align="center">
+  <img src="docs/assets/geotalos-logo.png" alt="GeoTALOS logo" width="42">
+  GeoTALOS Platform
+</h1>
 
-<h1 align="center">GeoTALOS Platform</h1>
-
 <p align="center">
-  <img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/spygaurad/GeoTalosProd">
-  <img alt="GitHub issues" src="https://img.shields.io/github/issues/spygaurad/GeoTalosProd">
-  <img alt="GitHub stars" src="https://img.shields.io/github/stars/spygaurad/GeoTalosProd?style=social">
+  <img alt="AOI-driven workflows" src="https://img.shields.io/badge/AOI--driven-workflows-2f855a">
+  <img alt="FastAPI backend" src="https://img.shields.io/badge/API-FastAPI-009688">
+  <img alt="React map UI" src="https://img.shields.io/badge/UI-React%20Map-2563eb">
+  <img alt="PostGIS and pgSTAC" src="https://img.shields.io/badge/Spatial-PostGIS%20%2B%20pgSTAC-7c3aed">
+  <img alt="Docker Compose deployment" src="https://img.shields.io/badge/Deploy-Docker%20Compose-f97316">
 </p>
 
 <p align="center">

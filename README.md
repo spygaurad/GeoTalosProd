@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="docs/assets/geotalos-logo.png" alt="GeoTALOS logo" width="42">
+  <img src="docs/assets/geotalos-logo.png" alt="GeoTALOS logo" width="64">
   GeoTALOS Platform
 </h1>
 

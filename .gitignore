@@ -1,7 +1,6 @@
 .env
 .claude/
 CLAUDE.md
-docs*
 runs/
 evaluation/results/
 next_steps.txt
@@ -19,3 +18,5 @@ combine_code.py
 combine_code.py.save
 
 *.png
+!docs/assets/geotalos-logo.png
+!docs/assets/geotalos-platform-overview.png

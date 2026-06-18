@@ -2,7 +2,7 @@
 
 GEOTALOS is a geospatial AI platform for imagery discovery, annotation workflows, model execution, and map-centered automation.
 
-![Overview placeholder](assets/placeholder-overview.svg)
+![GeoTALOS platform overview](assets/geotalos-platform-overview.png)
 
 ## Main Capabilities
 

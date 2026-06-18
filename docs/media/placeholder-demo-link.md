@@ -1,1 +1,1 @@
-Replace this file with the public link to the TALOS demo video.
+GeoTALOS demo video: https://www.youtube.com/watch?v=KoLlAJi2LYg

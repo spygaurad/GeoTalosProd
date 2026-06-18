@@ -1,7 +1,4 @@
-<h1 align="center">
-  <img src="docs/assets/geotalos-logo.png" alt="GeoTALOS logo" width="64">
-  GeoTALOS Platform
-</h1>
+<h1 align="center"><img src="docs/assets/geotalos-logo.png" alt="GeoTALOS logo" width="44"> GeoTALOS Platform</h1>
 
 <p align="center">
   <img alt="AOI-driven workflows" src="https://img.shields.io/badge/AOI--driven-workflows-2f855a">

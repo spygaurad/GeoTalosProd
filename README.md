@@ -33,7 +33,7 @@
 
 ## Why GeoTALOS
 
-> GeoTALOS brings imagery discovery, model execution, annotation review, and workflow automation into one map-centered platform so teams can work from a selected area instead of switching between disconnected tools.
+> Existing tools like QGIS handle pieces of the geospatial AI pipeline well, but require analysts to stitch together disconnected plugins, manually configure temporal layers, and re-run workflows by hand each time new imagery arrives. GeoTALOS connects AOI selection, imagery discovery, model execution, annotation, and workflow automation in one environment so monitoring workflows are repeatable, reviewable, and accessible to the whole team without custom engineering overhead.
 
 ## What You Can Do
 

@@ -1,25 +1,22 @@
-<h1 align="center"><img src="docs/assets/geotalos-logo.png" alt="GeoTALOS logo" width="44"> GeoTALOS Platform</h1>
+<div align="center">
 
-<p align="center">
-  <img alt="AOI-driven workflows" src="https://img.shields.io/badge/AOI--driven-workflows-2f855a">
-  <img alt="FastAPI backend" src="https://img.shields.io/badge/API-FastAPI-009688">
-  <img alt="React map UI" src="https://img.shields.io/badge/UI-React%20Map-2563eb">
-  <img alt="PostGIS and pgSTAC" src="https://img.shields.io/badge/Spatial-PostGIS%20%2B%20pgSTAC-7c3aed">
-  <img alt="Docker Compose deployment" src="https://img.shields.io/badge/Deploy-Docker%20Compose-f97316">
-</p>
+<h1 align="center">
+  <img src="docs/assets/GeoTalos_logo.png" alt="GeoTALOS logo" width="36" height="36" style="vertical-align: middle; margin-top: -6px; margin-right: 12px;">GeoTALOS Platform
+</h1>
 
-<p align="center">
-  GeoTALOS is an AOI-driven geospatial AI platform for discovering imagery, running models, reviewing annotations, and automating monitoring workflows through an interactive map and visual workflow builder.
-</p>
+  [![AOI-driven workflows](https://img.shields.io/badge/AOI--driven-workflows-2f855a)](#)
+  [![FastAPI backend](https://img.shields.io/badge/API-FastAPI-009688)](#)
+  [![React map UI](https://img.shields.io/badge/UI-React%20Map-2563eb)](#)
+  [![PostGIS and pgSTAC](https://img.shields.io/badge/Spatial-PostGIS%20%2B%20pgSTAC-7c3aed)](#)
+  [![Docker Compose deployment](https://img.shields.io/badge/Deploy-Docker%20Compose-f97316)](#)
 
-<p align="center">
-  <a href="docs/index.md">📘 Documentation</a> •
-  <a href="docs/workflows.md">🧩 Workflows</a> •
-  <a href="docs/architecture.md">🏗️ Architecture</a> •
-  <a href="docs/setup.md">⚙️ Setup</a> •
-  <a href="docs/links/api-docs-link.md">🔌 API</a> •
-  <a href="https://github.com/spygaurad/GeoTalosUI">🖥️ UI Repo</a>
-</p>
+  **GeoTALOS** is an AOI-driven geospatial AI platform for discovering imagery, running models, reviewing annotations, and automating monitoring workflows through an interactive map and visual workflow builder.
+
+  ### 📘 [Documentation](docs/index.md) &nbsp;•&nbsp; 🧩 [Workflows](docs/workflows.md) &nbsp;•&nbsp; 🏗️ [Architecture](docs/architecture.md) &nbsp;•&nbsp; ⚙️ [Setup](docs/setup.md) &nbsp;•&nbsp; 🔌 [API](docs/links/api-docs-link.md) &nbsp;•&nbsp; 🖥️ [UI Repo](https://github.com/spygaurad/GeoTalosUI)
+
+</div>
+
+---
 
 ## Highlights
 

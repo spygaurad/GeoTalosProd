@@ -11,7 +11,7 @@ GEOTALOS supports map-centered workflows for geospatial monitoring and analysis.
 5. Review and compare outputs
 6. Save results back to the map
 
-![GEOTALOS workflow](assets/fig2_sig.jpg)
+![GeoTALOS example workflow](assets/geotalos-example-workflow.png)
 
 ## Automation Workflow
 

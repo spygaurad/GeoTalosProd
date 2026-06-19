@@ -1,13 +1,11 @@
-<p align="center">
-  <img src="docs/assets/geotalos-logo.png" alt="GeoTALOS logo" width="140">
-</p>
-
-<h1 align="center">GeoTALOS Platform</h1>
+<h1 align="center"><img src="docs/assets/geotalos-logo.png" alt="GeoTALOS logo" width="44"> GeoTALOS Platform</h1>
 
 <p align="center">
-  <img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/spygaurad/GeoTalosProd">
-  <img alt="GitHub issues" src="https://img.shields.io/github/issues/spygaurad/GeoTalosProd">
-  <img alt="GitHub stars" src="https://img.shields.io/github/stars/spygaurad/GeoTalosProd?style=social">
+  <img alt="AOI-driven workflows" src="https://img.shields.io/badge/AOI--driven-workflows-2f855a">
+  <img alt="FastAPI backend" src="https://img.shields.io/badge/API-FastAPI-009688">
+  <img alt="React map UI" src="https://img.shields.io/badge/UI-React%20Map-2563eb">
+  <img alt="PostGIS and pgSTAC" src="https://img.shields.io/badge/Spatial-PostGIS%20%2B%20pgSTAC-7c3aed">
+  <img alt="Docker Compose deployment" src="https://img.shields.io/badge/Deploy-Docker%20Compose-f97316">
 </p>
 
 <p align="center">
@@ -33,7 +31,7 @@
 
 ## Why GeoTALOS
 
-> GeoTALOS brings imagery discovery, model execution, annotation review, and workflow automation into one map-centered platform so teams can work from a selected area instead of switching between disconnected tools.
+> Existing tools like QGIS handle pieces of the geospatial AI pipeline well, but require analysts to stitch together disconnected plugins, manually configure temporal layers, and re-run workflows by hand each time new imagery arrives. GeoTALOS connects AOI selection, imagery discovery, model execution, annotation, and workflow automation in one environment so monitoring workflows are repeatable, reviewable, and accessible to the whole team without custom engineering overhead.
 
 ## What You Can Do
 
@@ -83,9 +81,17 @@
 
 ![GeoTALOS platform overview](docs/assets/geotalos-platform-overview.png)
 
+## Map Workspace
+
+![GeoTALOS map workspace](docs/assets/geotalos-map-workspace.png)
+
 ## Example Workflow
 
-![GeoTALOS workflow](docs/assets/fig2_sig.jpg)
+![GeoTALOS example workflow](docs/assets/geotalos-example-workflow.png)
+
+## Temporal Monitoring
+
+![GeoTALOS temporal monitoring workflow](docs/assets/geotalos-temporal-workflow.png)
 
 ## Demo Video
 

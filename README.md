@@ -12,7 +12,7 @@
 
   **GeoTALOS** is an AOI-driven geospatial AI platform for discovering imagery, running models, reviewing annotations, and automating monitoring workflows through an interactive map and visual workflow builder.
 
-  ### 📘 [Documentation](docs/index.md) &nbsp;•&nbsp; 🧩 [Workflows](docs/workflows.md) &nbsp;•&nbsp; 🏗️ [Architecture](docs/architecture.md) &nbsp;•&nbsp; ⚙️ [Setup](docs/setup.md) &nbsp;•&nbsp; 🔌 [API](docs/links/api-docs-link.md) &nbsp;•&nbsp; 🖥️ [UI Repo](https://github.com/spygaurad/GeoTalosUI)
+📘 [Documentation](docs/index.md) &nbsp;•&nbsp; 🧩 [Workflows](docs/workflows.md) &nbsp;•&nbsp; 🏗️ [Architecture](docs/architecture.md) &nbsp;•&nbsp; ⚙️ [Setup](docs/setup.md) &nbsp;•&nbsp; 🔌 [API](docs/links/api-docs-link.md) &nbsp;•&nbsp; 🖥️ [UI Repo](https://github.com/spygaurad/GeoTalosUI)
 
 </div>
 

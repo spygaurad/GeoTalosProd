@@ -6,6 +6,7 @@ utility small, pure where possible, and independently testable; add new ones
 here as conversion/formatting needs arise (this module is expected to grow).
 
 Currently provides:
+- ``cog``: GeoTIFF -> COG
 - ``raster_mask``: raster segmentation mask (COG) -> vector annotations, so a
   raster ground-truth set becomes comparable to vector model predictions for
   IoU / precision / recall metrics.
@@ -16,6 +17,7 @@ Currently provides:
   two raster class masks (handles differing size/extent/CRS).
 """
 
+from app.services.conversion.cog import convert_geotiff_to_cog
 from app.services.conversion.raster_mask import (
     RasterMaskVectorizeResult,
     dissolve_features_by_class,
@@ -38,6 +40,7 @@ __all__ = [
     "RasterizeResult",
     "build_value_class_map",
     "compare_raster_masks",
+    "convert_geotiff_to_cog",
     "dissolve_features_by_class",
     "raster_mask_to_features",
     "rasterize_annotation_sets_to_cog",

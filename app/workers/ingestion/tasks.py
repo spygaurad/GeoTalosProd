@@ -24,6 +24,7 @@ from app.models.dataset import Dataset
 from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.services import storage_service
+from app.services.conversion import convert_geotiff_to_cog
 from app.workers.celery_app import celery_app
 from app.workers.db import WorkerSession
 from app.workers.queues import INGESTION
@@ -32,6 +33,7 @@ from app.workers.ingestion.rasterio_utils import (
     build_stac_collection,
     build_stac_item,
     extract_cog_metadata,
+    is_cloud_optimized_geotiff,
     validate_cog,
 )
 
@@ -97,6 +99,98 @@ def _gdal_env_for_worker() -> dict:
         "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
         "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff",
     }
+
+def _safe_raster_stem(filename: str) -> str:
+    stem = os.path.splitext(os.path.basename((filename or "").replace("\\", "/")))[0]
+    cleaned = "".join(c if c.isalnum() or c in "._-" else "_" for c in stem).strip("._-")
+    return cleaned[:80] or "raster"
+
+
+def _processed_cog_object_key(dataset_id: uuid.UUID, filename: str) -> str:
+    return storage_service.object_key(
+        dataset_id, f"processed/{_safe_raster_stem(filename)}_cog.tif"
+    )
+
+
+def _processed_zip_cog_object_key(
+    dataset_id: uuid.UUID, file_hash: str, filename: str
+) -> str:
+    digest = file_hash or "unknown"
+    return storage_service.object_key(
+        dataset_id, f"processed/{digest}_{_safe_raster_stem(filename)}_cog.tif"
+    )
+
+
+def _convert_if_not_cog(source_path: str, dest_path: str, gdal_env: dict) -> bool:
+    is_valid, is_cog, issues = is_cloud_optimized_geotiff(source_path, gdal_env)
+    if not is_valid:
+        raise PermanentTaskError("\n".join(issues) or "Raster validation failed")
+    if is_cog:
+        return False
+    logger.info(
+        "non_cog_detected uri=%s issues=%s converting_to=%s",
+        source_path, issues, dest_path,
+    )
+    try:
+        convert_geotiff_to_cog(source_path, dest_path, gdal_env=gdal_env)
+    except ValueError as exc:
+        raise PermanentTaskError(
+            f"GeoTIFF to COG conversion failed: {exc}"
+        ) from exc
+    return True
+
+
+def _maybe_convert_non_cog(
+    *,
+    organization_id: uuid.UUID,
+    dataset_id: uuid.UUID,
+    s3_uri: str,
+    filename: str,
+    gdal_env: dict,
+) -> str:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_out = os.path.join(tmpdir, f"{_safe_raster_stem(filename)}_cog.tif")
+        converted = _convert_if_not_cog(s3_uri, tmp_out, gdal_env)
+        if not converted:
+            return s3_uri
+
+        cog_key = _processed_cog_object_key(dataset_id, filename)
+        bucket = storage_service.bucket_name(organization_id)
+        converted_uri = f"s3://{bucket}/{cog_key}"
+        storage_service.upload_from_path(
+            organization_id, cog_key, tmp_out, content_type="image/tiff"
+        )
+
+    logger.info("cog_uploaded src=%s dest=%s", s3_uri, converted_uri)
+    return converted_uri
+
+
+def _prepare_zip_member_raster(
+    *,
+    organization_id: uuid.UUID,
+    dataset_id: uuid.UUID,
+    local_path: str,
+    basename: str,
+    file_hash: str,
+    bucket: str,
+    gdal_env: dict,
+) -> str:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_out = os.path.join(tmpdir, f"{_safe_raster_stem(basename)}_cog.tif")
+        converted = _convert_if_not_cog(local_path, tmp_out, gdal_env)
+        if converted:
+            cog_key = _processed_zip_cog_object_key(dataset_id, file_hash, basename)
+            storage_service.upload_from_path(
+                organization_id, cog_key, tmp_out, content_type="image/tiff"
+            )
+            uri = f"s3://{bucket}/{cog_key}"
+            logger.info("cog_uploaded src=%s dest=%s", local_path, uri)
+            return uri
+
+    extracted_key = f"datasets/{dataset_id}/{file_hash}_{basename}"
+    storage_service.upload_from_path(organization_id, extracted_key, local_path)
+    return f"s3://{bucket}/{extracted_key}"
+
 
 def _deterministic_item_id(s3_uri: str) -> str:
     return hashlib.md5(s3_uri.encode()).hexdigest()
@@ -390,39 +484,44 @@ def _ingest_folder_group(
 
         try:
             fhash = _file_hash(file_path)
-            unique_name = f"{fhash}_{basename}"
-            extracted_key = f"datasets/{dataset_id}/{unique_name}"
-            s3_uri = f"s3://{bucket}/{extracted_key}"
-
-            storage_service.upload_from_path(
-                job.organization_id, extracted_key, file_path
-            )
-
-            # Use _prepare_single_cog to avoid individual pgSTAC inserts
-            success, issues, item_id, stac_item = _prepare_single_cog(
-                s3_uri, basename, collection, gdal_env, dataset.dataset_type
-            )
-
-            if success:
-                processed += 1
-                job.processed_items = (job.processed_items or 0) + 1
-                
-                # Add to batch for later pgSTAC insert
-                stac_items_to_insert.append(stac_item)
-                
-                # Insert into app DB immediately for error recovery
-                _upsert_dataset_item(
-                    session,
-                    dataset_id=uuid.UUID(dataset_id),
+            try:
+                s3_uri = _prepare_zip_member_raster(
                     organization_id=job.organization_id,
-                    stac_item_id=item_id,
-                    stac_collection_id=collection,
-                    s3_uri=s3_uri,
-                    filename=basename,
-                    stac_item=stac_item,
+                    dataset_id=uuid.UUID(dataset_id),
+                    local_path=file_path,
+                    basename=basename,
+                    file_hash=fhash,
+                    bucket=bucket,
+                    gdal_env=gdal_env,
                 )
+            except PermanentTaskError as exc:
+                failed_files.append(f"{basename}: {exc}")
             else:
-                failed_files.append(f"{basename}: {'; '.join(issues)}")
+                # Use _prepare_single_cog to avoid individual pgSTAC inserts
+                success, issues, item_id, stac_item = _prepare_single_cog(
+                    s3_uri, basename, collection, gdal_env, dataset.dataset_type
+                )
+
+                if success:
+                    processed += 1
+                    job.processed_items = (job.processed_items or 0) + 1
+
+                    # Add to batch for later pgSTAC insert
+                    stac_items_to_insert.append(stac_item)
+
+                    # Insert into app DB immediately for error recovery
+                    _upsert_dataset_item(
+                        session,
+                        dataset_id=uuid.UUID(dataset_id),
+                        organization_id=job.organization_id,
+                        stac_item_id=item_id,
+                        stac_collection_id=collection,
+                        s3_uri=s3_uri,
+                        filename=basename,
+                        stac_item=stac_item,
+                    )
+                else:
+                    failed_files.append(f"{basename}: {'; '.join(issues)}")
 
         finally:
             if os.path.exists(file_path):
@@ -626,15 +725,18 @@ def ingest_dataset(self, job_id: str, dataset_id: str, s3_key: str, filename: st
         dataset.status = DatasetStatus.INGESTING
         session.commit()
 
-        # Track all datasets created during this job (for error cleanup)
         created_datasets: list[Dataset] = [dataset]
+        is_zip = filename.lower().endswith(".zip")
+        is_multi_folder_zip = False
 
         try:
+            if job.organization_id != dataset.organization_id:
+                raise PermanentTaskError(
+                    "Job and dataset organization mismatch — refusing ingestion"
+                )
+
             bucket = storage_service.bucket_name(job.organization_id)
             gdal_env = _gdal_env_for_worker()
-
-            is_zip = filename.lower().endswith(".zip")
-            is_multi_folder_zip = False
 
             if is_zip:
                 _ingest_zip(session, job, dataset, bucket, s3_key, dataset_id, gdal_env)
@@ -649,7 +751,14 @@ def ingest_dataset(self, job_id: str, dataset_id: str, s3_key: str, filename: st
                     created_datasets = [ds for ds in created_datasets if ds is not None]
             else:
                 collection = _ensure_collection(session, dataset, job.organization_id)
-                s3_uri = f"s3://{bucket}/{s3_key}"
+                source_s3_uri = f"s3://{bucket}/{s3_key}"
+                s3_uri = _maybe_convert_non_cog(
+                    organization_id=job.organization_id,
+                    dataset_id=dataset.id,
+                    s3_uri=source_s3_uri,
+                    filename=filename,
+                    gdal_env=gdal_env,
+                )
                 success, issues, item_id, stac_item = _ingest_single_cog(
                     s3_uri, filename, collection, gdal_env, dataset.dataset_type
                 )
@@ -754,7 +863,6 @@ def refresh_annotation_statistics():
 # Default threshold: jobs pending/queued for more than 24 hours are stale
 STALE_JOB_THRESHOLD_HOURS = int(os.environ.get("STALE_JOB_THRESHOLD_HOURS", "24"))
 
-# Timeout for running/ingesting jobs: 10 minutes (per user requirement)
 RUNNING_JOB_TIMEOUT_MINUTES = int(os.environ.get("RUNNING_JOB_TIMEOUT_MINUTES", "10"))
 
 

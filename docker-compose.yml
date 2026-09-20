@@ -126,6 +126,19 @@ services:
       com.awakeforest.service: app-db
       com.awakeforest.role: database
 
+  app-db-migrate:
+    <<: *app-build
+    container_name: awakeforest-app-db-migrate
+    environment:
+      <<: *app-env
+    command: alembic upgrade head
+    depends_on:
+      app-db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - awakeforest-backend
+
   stac-db:
     image: ghcr.io/stac-utils/pgstac:v0.9.10
     container_name: awakeforest-stac-db
@@ -409,6 +422,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       stac-db:
         condition: service_healthy
       redis:
@@ -449,6 +464,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       stac-db:
         condition: service_healthy
       stac-db-migrate:
@@ -483,6 +500,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       minio:
@@ -513,6 +532,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       stac-db:
         condition: service_healthy
       redis:
@@ -548,6 +569,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       minio:
@@ -577,6 +600,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     networks:
@@ -603,6 +628,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     networks:
@@ -656,11 +683,13 @@ services:
     command: --config /config.yaml
     volumes:
       - ./infra/docker/martin/config.yaml:/config.yaml:ro
-    ports:
-      - "${MARTIN_PORT:-3000}:3000"
+    # ports:
+    #   - "${MARTIN_PORT:-3000}:3000"
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
     healthcheck:
       # Martin binds to the Docker bridge interface, not loopback — check via
       # the host-mapped port instead of localhost inside the container.

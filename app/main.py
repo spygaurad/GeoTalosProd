@@ -1,7 +1,9 @@
+
 import logging
 import time
 from contextlib import asynccontextmanager
 from uuid import uuid4
+import httpx
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,12 +28,19 @@ if settings.ENVIRONMENT != "development":
 async def lifespan(app: FastAPI):
     # In development, seed a dev org and user so the hardcoded dev claims in
     # ClerkAuthMiddleware resolve correctly without a real Clerk account.
+    
     if settings.ENVIRONMENT == "development":
         try:
             await _seed_dev_fixtures()
         except Exception:
             logger.warning("dev_seed_failed database not ready", exc_info=True)
-    yield
+
+    async with httpx.AsyncClient(
+        base_url=settings.MARTIN_URL,
+        timeout=30.0,
+    ) as martin_client:
+        app.state.martin_client = martin_client
+        yield
 
 
 async def _seed_dev_fixtures() -> None:

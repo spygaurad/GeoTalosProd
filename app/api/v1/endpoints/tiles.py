@@ -18,7 +18,6 @@ titiler rendering options (``assets``, ``colormap``, ``rescale``, etc.).
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 from urllib.parse import quote
 from uuid import UUID
@@ -37,8 +36,7 @@ from app.models.dataset_item import DatasetItem
 from app.models.user import User
 from app.schemas.tile import MultiDatasetTileRequest, MultiItemTileRequest
 from app.services import titiler_service
-
-logger = logging.getLogger(__name__)
+from app.services.tile_proxy import forward_tile
 
 router = APIRouter(prefix="/tiles", tags=["tiles"])
 
@@ -73,44 +71,11 @@ async def _proxy_tile(titiler_path: str, query_string: str) -> Response:
         # No query string - add default assets
         url = f"{titiler_path}?assets=data"
 
-    client = _get_proxy_client()
-    try:
-        resp = await client.get(url)
-    except httpx.RequestError as exc:
-        logger.error("tile_proxy_connection_error path=%s error=%s", titiler_path, exc)
-        raise HTTPException(status_code=502, detail="Tile service unavailable") from exc
-
-    if resp.status_code == 204:
-        return Response(status_code=204)
-
-    if resp.status_code == 404:
-        raise HTTPException(status_code=404, detail="Tile not found")
-
-    if resp.status_code >= 400:
-        body_preview = resp.text[:500] if resp.text else "(empty)"
-        logger.warning(
-            "tile_proxy_upstream_error path=%s status=%s body=%s",
-            titiler_path, resp.status_code, body_preview,
-        )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Tile service error (HTTP {resp.status_code}): {body_preview}",
-        )
-
-    content_type = resp.headers.get("content-type", "image/png").split(";")[0].strip()
-
-    headers: dict[str, str] = {}
-    for header in ("cache-control", "etag", "last-modified", "content-length"):
-        if header in resp.headers:
-            headers[header] = resp.headers[header]
-
-    return Response(
-        content=resp.content,
-        status_code=200,
-        media_type=content_type,
-        headers=headers,
+    return await forward_tile(
+        _get_proxy_client(),
+        url,
+        default_content_type="image/png",
     )
-
 
 # ---------------------------------------------------------------------------
 # Tier 1: Collection tiles (whole dataset)

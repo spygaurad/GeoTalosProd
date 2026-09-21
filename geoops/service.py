@@ -29,10 +29,8 @@ from app.models.dataset_item import DatasetItem
 from app.services.titiler_service import get_item_bbox_preview
 
 from geoops.models import Embedding
+from geoops.scale import bbox_span_m, nearest_tier
 from geoops.schemas import (
-    AOIScanMatch,
-    AOIScanRequest,
-    AOIScanResponse,
     EmbeddingCreateRequest,
     EmbeddingSearchMatch,
     EmbeddingSearchRequest,
@@ -44,14 +42,6 @@ logger = logging.getLogger(__name__)
 def _bbox_of(geometry: dict[str, Any]) -> list[float]:
     minx, miny, maxx, maxy = shape(geometry).bounds
     return [float(minx), float(miny), float(maxx), float(maxy)]
-
-
-def _intersect(a: list[float], b: list[float]) -> list[float] | None:
-    minx, miny = max(a[0], b[0]), max(a[1], b[1])
-    maxx, maxy = min(a[2], b[2]), min(a[3], b[3])
-    if minx >= maxx or miny >= maxy:
-        return None
-    return [minx, miny, maxx, maxy]
 
 
 class EmbeddingService:
@@ -129,9 +119,23 @@ class EmbeddingService:
     # ── embed model call ─────────────────────────────────────────────────
 
     async def _crop_png_b64(self, item: DatasetItem, bbox: list[float], size_px: int) -> str:
-        image_bytes = await get_item_bbox_preview(
-            item.stac_collection_id, item.stac_item_id, bbox=bbox, width=size_px, height=size_px
-        )
+        # TiTiler-pgstac 400s with "assets must be defined either via expression
+        # or assets options" if `assets` is omitted — "data" is this codebase's
+        # standard single-asset COG key (see app.services.model_manager's
+        # patch_asset default). `asset_bidx` forces an explicit 3-band RGB
+        # selection: without it, TiTiler renders every band of the "data"
+        # asset, and rio-tiler's PNG encoder 500s on some band counts (e.g.
+        # 4-band assets — "Could not encode array of shape (4,H,W) ... using
+        # PNG driver"). The embed contract expects an RGB patch regardless of
+        # the source asset's actual band count, same as
+        # app.services.model_manager's rendering-config-derived asset_bidx.
+        try:
+            image_bytes = await get_item_bbox_preview(
+                item.stac_collection_id, item.stac_item_id, bbox=bbox,
+                width=size_px, height=size_px, assets="data", asset_bidx="data|1,2,3",
+            )
+        except RuntimeError as exc:
+            raise bad_request(f"Failed to crop patch from TiTiler: {exc}") from exc
         if not image_bytes:
             raise bad_request("Empty patch image from TiTiler")
         return base64.b64encode(image_bytes).decode("ascii")
@@ -187,6 +191,19 @@ class EmbeddingService:
             org_id, payload.annotation_id, payload.class_id
         )
 
+        # An annotation only ever needs one embedding per model (unique index
+        # uq_embeddings_annotation_model) — the anomaly-detection job relies
+        # on this same one-per-(annotation,model) invariant, so re-embedding
+        # here returns the existing row instead of hitting a constraint error.
+        if annotation_id is not None:
+            existing = await self.session.scalar(
+                select(Embedding).where(
+                    Embedding.annotation_id == annotation_id, Embedding.model_id == model.id
+                )
+            )
+            if existing is not None:
+                return existing
+
         bbox = _bbox_of(payload.geometry)
         patch_b64 = await self._crop_png_b64(item, bbox, payload.crop_size_px)
         embed_result = await self._call_embed_model(model, item, patch_b64, bbox)
@@ -200,6 +217,7 @@ class EmbeddingService:
             class_id=class_id,
             annotation_id=annotation_id,
             source_geometry=payload.geometry,
+            tile_tier=nearest_tier(bbox_span_m(payload.geometry)),
             embedding=embed_result["embedding"],
             created_by_user_id=user_id,
         )
@@ -217,6 +235,10 @@ class EmbeddingService:
         query = select(Embedding, distance_expr.label("distance")).where(
             Embedding.organization_id == org_id,
             Embedding.model_name == reference.model_name,
+            # Same real-world scale only — a 5m object and a 500m object are
+            # never comparable just because they were both cropped to the
+            # same crop_size_px pixel grid. See geoops/scale.py.
+            Embedding.tile_tier == reference.tile_tier,
         )
         if payload.class_id is not None:
             query = query.where(Embedding.class_id == payload.class_id)
@@ -243,94 +265,7 @@ class EmbeddingService:
             for row in rows
         ]
 
-    # ── AOI scan (view-only, nothing persisted) ──────────────────────────
-
-    def _tile_grid(self, item_bbox: list[float], tile_w: float, tile_h: float, stride_w: float, stride_h: float) -> list[list[float]]:
-        minx, miny, maxx, maxy = item_bbox
-        tiles: list[list[float]] = []
-        y = miny
-        while y < maxy:
-            x = minx
-            top = min(y + tile_h, maxy)
-            while x < maxx:
-                right = min(x + tile_w, maxx)
-                tiles.append([x, y, right, top])
-                if right >= maxx:
-                    break
-                x += stride_w
-            if top >= maxy:
-                break
-            y += stride_h
-        return tiles
-
-    async def aoi_scan(self, org_id: UUID, payload: AOIScanRequest) -> AOIScanResponse:
-        reference = await self._get_embedding(org_id, payload.reference_embedding_id)
-        model = await self._get_model(org_id, reference.model_id) if reference.model_id else None
-        if model is None:
-            raise bad_request("Reference embedding's model no longer exists")
-
-        ref_minx, ref_miny, ref_maxx, ref_maxy = _bbox_of(reference.source_geometry)
-        tile_w = max((ref_maxx - ref_minx) * payload.scale_factor, 1e-6)
-        tile_h = max((ref_maxy - ref_miny) * payload.scale_factor, 1e-6)
-        stride_w = max(tile_w * (1.0 - payload.overlap), tile_w * 0.1)
-        stride_h = max(tile_h * (1.0 - payload.overlap), tile_h * 0.1)
-
-        items = [await self._get_dataset_item(org_id, item_id) for item_id in payload.dataset_item_ids]
-
-        all_patches: list[tuple[DatasetItem, list[float]]] = []
-        for item in items:
-            item_bbox = _bbox_of(item.geometry) if item.geometry else None
-            if item_bbox is None:
-                continue
-            clip_bbox = _intersect(item_bbox, payload.aoi_bbox) if payload.aoi_bbox else item_bbox
-            if clip_bbox is None:
-                continue
-            for tile_bbox in self._tile_grid(clip_bbox, tile_w, tile_h, stride_w, stride_h):
-                all_patches.append((item, tile_bbox))
-
-        if len(all_patches) > payload.max_patches:
-            raise bad_request(
-                f"AOI scan would produce {len(all_patches)} patches, over the max_patches "
-                f"limit of {payload.max_patches}. Narrow the AOI, raise scale_factor, or "
-                f"reduce overlap."
-            )
-
-        matches: list[AOIScanMatch] = []
-        for item, tile_bbox in all_patches:
-            try:
-                patch_b64 = await self._crop_png_b64(item, tile_bbox, payload.crop_size_px)
-                embed_result = await self._call_embed_model(model, item, patch_b64, tile_bbox)
-            except Exception as exc:  # noqa: BLE001 — one bad patch shouldn't fail the whole scan
-                logger.warning("aoi_scan_patch_failed dataset_item_id=%s bbox=%s error=%s", item.id, tile_bbox, exc)
-                continue
-
-            if embed_result["model_name"] != reference.model_name:
-                continue
-
-            distance = _cosine_distance(embed_result["embedding"], reference.embedding)
-            similarity = 1.0 - distance
-            if payload.min_similarity is not None and similarity < payload.min_similarity:
-                continue
-            matches.append(
-                AOIScanMatch(dataset_item_id=item.id, bbox=tile_bbox, similarity=similarity, distance=distance)
-            )
-
-        matches.sort(key=lambda m: m.similarity, reverse=True)
-        return AOIScanResponse(
-            reference_embedding_id=reference.id,
-            model_name=reference.model_name,
-            patches_scanned=len(all_patches),
-            matches=matches[: payload.top_k],
-        )
-
-
-def _cosine_distance(a: list[float], b: Any) -> float:
-    b_list = list(b)
-    if len(a) != len(b_list):
-        raise bad_request("Embedding dimension mismatch between patch and reference")
-    dot = sum(x * y for x, y in zip(a, b_list))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(y * y for y in b_list) ** 0.5
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 1.0
-    return 1.0 - (dot / (norm_a * norm_b))
+    # AOI scan is no longer handled here — it's a Celery job (multi-tile,
+    # HTTP-bound work doesn't belong inline in a request). See
+    # geoops/tasks.py::run_aoi_scan and POST /embeddings/aoi-scan in
+    # geoops/api.py, which only creates the Job and enqueues the task.

@@ -116,7 +116,7 @@ class ModelManager:
         context: dict[str, Any],
         output_cfg: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
-        patch_size_px = int(output_cfg.get("patch_size_px", self._DEFAULT_PATCH_SIZE))
+        patch_size_px = self._resolve_patch_size_px(output_cfg, context)
         stride_px_cfg = output_cfg.get("stride_px")
         stride_px = int(stride_px_cfg) if stride_px_cfg is not None else None
         max_patches = int(output_cfg.get("max_patches_per_item", self._DEFAULT_MAX_PATCHES))
@@ -142,6 +142,113 @@ class ModelManager:
             clip_bbox=effective_aoi["effective_bbox"],
         )
         return [w.as_dict() for w in windows], capped, effective_aoi
+
+    @staticmethod
+    def _merge_overlapping_predictions(
+        predictions: list[dict[str, Any]], iou_thresh: float
+    ) -> list[dict[str, Any]]:
+        """Greedy NMS across every patch's predictions for one dataset item,
+        grouped by class. Adjacent (or, with a small patch_size_m, even
+        genuinely overlapping) scan patches routinely re-detect the same
+        real-world object — this collapses those duplicates to the single
+        highest-confidence box, the same idea as palm_api's ``apply_nms``
+        (``torchvision.ops.nms``) but over already-georeferenced polygons
+        spanning many different patches' pixel spaces, rather than boxes
+        within one image.
+
+        Point geometries (e.g. the crown-detection adapter) are passed
+        through unmerged — IoU is meaningless for a zero-area point, and
+        those detections aren't prone to this per-patch duplication the way
+        box/polygon detectors are.
+        """
+        if not predictions:
+            return predictions
+
+        by_class: dict[Any, list[dict[str, Any]]] = {}
+        for p in predictions:
+            by_class.setdefault(p["class_id"], []).append(p)
+
+        kept: list[dict[str, Any]] = []
+        for group in by_class.values():
+            shapes = [shape(p["geom_4326"]) for p in group]
+            if any(s.geom_type == "Point" for s in shapes):
+                kept.extend(group)
+                continue
+
+            order = sorted(range(len(group)), key=lambda i: group[i]["confidence"], reverse=True)
+
+            # Grid-bucket kept boxes by centroid so each new candidate only
+            # needs to be IoU-checked against nearby survivors, not every
+            # survivor so far — O(n) in practice instead of O(n^2), which
+            # matters once a single item's scan produces tens of thousands
+            # of raw (pre-merge) predictions.
+            widths = [s.bounds[2] - s.bounds[0] for s in shapes if s.bounds[2] > s.bounds[0]]
+            cell = (sorted(widths)[len(widths) // 2] * 3) if widths else 0.0005
+            cell = max(cell, 1e-7)
+
+            grid: dict[tuple[int, int], list[int]] = {}
+            kept_indices: list[int] = []
+            for i in order:
+                shp = shapes[i]
+                cx, cy = shp.centroid.x, shp.centroid.y
+                gx, gy = math.floor(cx / cell), math.floor(cy / cell)
+                suppressed = False
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for j in grid.get((gx + dx, gy + dy), []):
+                            other = shapes[j]
+                            if not shp.intersects(other):
+                                continue
+                            inter = shp.intersection(other).area
+                            if inter <= 0:
+                                continue
+                            union = shp.area + other.area - inter
+                            if union > 0 and inter / union >= iou_thresh:
+                                suppressed = True
+                                break
+                        if suppressed:
+                            break
+                    if suppressed:
+                        break
+                if suppressed:
+                    continue
+                grid.setdefault((gx, gy), []).append(i)
+                kept_indices.append(i)
+
+            kept.extend(group[i] for i in kept_indices)
+
+        return kept
+
+    _METERS_PER_DEGREE_LAT = 110_540.0
+    _METERS_PER_DEGREE_LON_AT_EQUATOR = 111_320.0
+
+    @classmethod
+    def _resolve_patch_size_px(cls, output_cfg: dict[str, Any], context: dict[str, Any]) -> int:
+        """A model can specify its scan tile either as a fixed pixel count
+        (``patch_size_px``) or, more usefully for anything trained on small
+        real-world objects, as a real-world size in meters
+        (``patch_size_m``) — converted here to pixels using THIS target
+        item's own ground sample distance, so the same head scans correctly
+        across imagery of different resolution instead of always requesting
+        a fixed pixel window that may span a wildly different real-world
+        area than what it was trained on.
+        """
+        patch_size_m = output_cfg.get("patch_size_m")
+        item_bbox = context.get("bbox")
+        item_width = context.get("width")
+        item_height = context.get("height")
+        if patch_size_m and item_bbox and item_width and item_height:
+            min_lon, min_lat, max_lon, max_lat = item_bbox
+            lon_span = max_lon - min_lon
+            lat_span = max_lat - min_lat
+            if lon_span > 0 and lat_span > 0:
+                mid_lat_rad = math.radians((min_lat + max_lat) / 2.0)
+                lon_m_per_px = (lon_span * cls._METERS_PER_DEGREE_LON_AT_EQUATOR * math.cos(mid_lat_rad)) / item_width
+                lat_m_per_px = (lat_span * cls._METERS_PER_DEGREE_LAT) / item_height
+                m_per_px = max(abs(lon_m_per_px), abs(lat_m_per_px)) or 1.0
+                px = round(float(patch_size_m) / m_per_px)
+                return max(16, min(4096, px))
+        return int(output_cfg.get("patch_size_px", cls._DEFAULT_PATCH_SIZE))
 
     def _resolve_effective_aoi(
         self,
@@ -583,7 +690,12 @@ class ModelManager:
                                 )
                             )
 
-                created_annotations = 0
+                # Buffered per-item, not written straight to the session:
+                # neighboring (or, at a small patch_size_m, even same-object
+                # spanning multiple) patches routinely re-detect the same
+                # real-world object, so predictions across all of this item's
+                # patches are merged (NMS) before anything is persisted.
+                item_predictions: list[dict[str, Any]] = []
                 for patch in patch_metadata:
                     patch_context = {
                         **context,
@@ -689,17 +801,37 @@ class ModelManager:
                                 "patch": patch,
                             }
                         )
-                        self.session.add(
-                            Annotation(
-                                annotation_set_id=annotation_set.id,
-                                class_id=target_class_id,
-                                geometry=parse_geometry(geom_4326),
-                                confidence=confidence,
-                                properties=properties,
-                                created_by_job_id=job.id,
-                            )
+                        item_predictions.append(
+                            {
+                                "class_id": target_class_id,
+                                "geom_4326": geom_4326,
+                                "confidence": confidence,
+                                "properties": properties,
+                            }
                         )
-                        created_annotations += 1
+
+                merge_overlapping = bool(output_cfg.get("merge_overlapping", True))
+                nms_iou_thresh = float(output_cfg.get("nms_iou_thresh", 0.4))
+                final_predictions = (
+                    self._merge_overlapping_predictions(item_predictions, nms_iou_thresh)
+                    if merge_overlapping
+                    else item_predictions
+                )
+
+                created_annotations = 0
+                for fp in final_predictions:
+                    self.session.add(
+                        Annotation(
+                            annotation_set_id=annotation_set.id,
+                            class_id=fp["class_id"],
+                            dataset_item_id=item.id,
+                            geometry=parse_geometry(fp["geom_4326"]),
+                            confidence=fp["confidence"],
+                            properties=fp["properties"],
+                            created_by_job_id=job.id,
+                        )
+                    )
+                    created_annotations += 1
 
                 self.session.add(
                     JobOutput(

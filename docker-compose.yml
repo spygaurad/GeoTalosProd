@@ -15,7 +15,7 @@
 #  Workers    : celery-worker-ingestion
 #               celery-worker-bulk
 #               celery-worker-analysis  (also handles discovery queue)
-#               celery-worker-inference
+#               celery-worker-inference (also handles embedding queue)
 #               celery-worker-default
 #               celery-beat             (scheduled tasks)
 #               flower                  (Celery monitoring UI → :5555)
@@ -59,6 +59,11 @@ x-app-env: &app-env
   STAC_API_URL: http://stac-api:8080
   TITILER_URL: http://titiler:8000
   TITILER_WORKERS: ${TITILER_WORKERS:-2}
+  # geoops-service — DINOv2-tier training/serving (geoops.dino_tasks calls
+  # /train and /eval; a registered head's ai_models.endpoint_url points
+  # ModelManager itself at /infer later).
+  GEOOPS_SERVICE_URL: http://geoops-service:8000
+  GEOOPS_SERVICE_API_TOKEN: ${GEOOPS_SERVICE_API_TOKEN:?GEOOPS_SERVICE_API_TOKEN must be set}
   # Public URL of the main API — used to rewrite TiTiler tile URLs in tilejson
   # responses so browsers call the tile proxy instead of titiler directly.
   # Override in staging/production with the real domain (no trailing slash).
@@ -531,19 +536,22 @@ services:
       com.awakeforest.role: worker
 
   celery-worker-inference:
-    # Queues: inference
-    # Handles: ML model inference, writes results back to S3 + annotations
+    # Queues: inference, embedding
+    # Handles: ML model inference, writes results back to S3 + annotations.
+    # embedding (geoops.tasks.run_aoi_scan) shares this worker rather than its
+    # own container — same profile as inference (HTTP-bound calls to an
+    # external model endpoint) and needs the same host.docker.internal access.
     # Add 'deploy.resources.reservations.devices' here for GPU access
     <<: *app-build
     container_name: awakeforest-worker-inference
     environment:
       <<: *app-env
-    extra_hosts:              
+    extra_hosts:
       - "host.docker.internal:host-gateway"
     command: >
       celery -A app.workers.celery_app worker
       --loglevel=${LOG_LEVEL:-INFO}
-      --queues=inference
+      --queues=inference,embedding,training
       --concurrency=${WORKER_CONCURRENCY_INFERENCE:-2}
       --hostname=inference@%h
     volumes:
@@ -675,6 +683,55 @@ services:
       com.awakeforest.service: martin
       com.awakeforest.role: tile-server
 
+  # ============================================================================
+  # MODEL SERVING (geoops-service)
+  # ============================================================================
+
+  geoops-service:
+    # Generic backbone+head training/serving service — DINOv2 today, other
+    # backbones later, all behind one set of routes (see geoops-service/app).
+    # Separate build context / image from the main app: keeps ML deps
+    # (torch, transformers — added in a later increment) out of api/worker
+    # images. No GPU reservation yet — the NVIDIA Container Toolkit isn't
+    # configured on this host; add a `deploy.resources.reservations.devices`
+    # block here once it is. Runs fine CPU-only in the meantime.
+    build:
+      context: ./geoops-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    container_name: awakeforest-geoops-service
+    environment:
+      API_TOKEN: ${GEOOPS_SERVICE_API_TOKEN:?GEOOPS_SERVICE_API_TOKEN must be set}
+      # MinIO/S3 — same bucket-per-org convention geoops's export tasks write
+      # to (training-runs/{job_id}/...). Only what's needed to read/write
+      # objects, not the full app-env anchor (no DB creds this service
+      # doesn't need).
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
+      AWS_S3_FORCE_PATH_STYLE: "true"
+      S3_BUCKET_PREFIX: ${S3_BUCKET_PREFIX:-org-}
+    volumes:
+      - geoops-service-model-cache:/srv/model-cache
+    ports:
+      - "${GEOOPS_SERVICE_PORT:-8020}:8000"
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - awakeforest-backend
+      - awakeforest-storage
+    labels:
+      com.awakeforest.service: geoops-service
+      com.awakeforest.role: model-serving
+
 # =============================================================================
 # VOLUMES
 # =============================================================================
@@ -690,6 +747,8 @@ volumes:
     name: awakeforest-minio-data
   celerybeat-schedule:
     name: awakeforest-celerybeat-schedule
+  geoops-service-model-cache:
+    name: awakeforest-geoops-service-model-cache
 
 # =============================================================================
 # NETWORKS

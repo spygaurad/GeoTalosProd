@@ -10,7 +10,10 @@ from app.db.base import Base
 
 class AIModel(Base):
     __tablename__ = "ai_models"
-    __table_args__ = (Index("idx_ai_models_org", "organization_id"),)
+    __table_args__ = (
+        Index("idx_ai_models_org", "organization_id"),
+        Index("idx_ai_models_backbone_model", "backbone_model_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -28,6 +31,15 @@ class AIModel(Base):
     output_schema: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     output_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # S3 URI of a head-only checkpoint produced by a finetune_model job, meant
+    # to be overlaid onto a shared backbone by yolo-service. Unset for models
+    # backed purely by an external endpoint_url.
+    artifact_uri: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # For a per-class head row: the shared backbone it overlays onto. NULL for
+    # a backbone row itself and for plain HTTP-endpoint inference models.
+    backbone_model_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ai_models.id", ondelete="SET NULL"), nullable=True
+    )
     annotation_schema_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("annotation_schemas.id", ondelete="SET NULL"), nullable=True
     )
@@ -52,4 +64,7 @@ class AIModel(Base):
         "ModelClassMapping",
         back_populates="model",
         cascade="all, delete-orphan",
+    )
+    backbone: Mapped["AIModel | None"] = relationship(
+        "AIModel", remote_side=[id], foreign_keys=[backbone_model_id]
     )

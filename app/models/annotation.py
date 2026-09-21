@@ -14,6 +14,7 @@ class Annotation(Base):
     __table_args__ = (
         Index("idx_annotations_created_by_user", "created_by_user_id"),
         Index("idx_annotations_created_by_job", "created_by_job_id"),
+        Index("idx_annotations_dataset_item", "dataset_item_id"),
         CheckConstraint(
             "(created_by_user_id IS NOT NULL AND created_by_job_id IS NULL) OR "
             "(created_by_user_id IS NULL AND created_by_job_id IS NOT NULL)",
@@ -29,6 +30,13 @@ class Annotation(Base):
     )
     class_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("annotation_classes.id"), nullable=False
+    )
+    # Image/COG this geometry was drawn or detected on. Redundant with
+    # annotation_set.dataset_item_id when the set is scoped to one item, but
+    # required for dataset-wide sets (e.g. the per-map verified set) where the
+    # set itself carries no single item. See migration 058.
+    dataset_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("dataset_items.id", ondelete="SET NULL"), nullable=True
     )
     geometry: Mapped[object] = mapped_column(Geometry("Geometry", srid=4326), nullable=False)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -51,3 +59,4 @@ class Annotation(Base):
     cls: Mapped["AnnotationClass"] = relationship("AnnotationClass", back_populates="annotations")
     creator_user: Mapped["User | None"] = relationship("User", foreign_keys=[created_by_user_id])
     creator_job: Mapped["Job | None"] = relationship("Job", foreign_keys=[created_by_job_id])
+    dataset_item: Mapped["DatasetItem | None"] = relationship("DatasetItem")

@@ -19,6 +19,8 @@ class AIModelCreate(ORMModel):
     output_schema: dict | None = None
     output_config: dict | None = None
     config: dict | None = None
+    artifact_uri: str | None = None
+    backbone_model_id: UUID | None = None
     annotation_schema_id: UUID | None = None
     created_by: UUID | None = None
 
@@ -36,6 +38,8 @@ class AIModelUpdate(ORMModel):
     output_schema: dict | None = None
     output_config: dict | None = None
     config: dict | None = None
+    artifact_uri: str | None = None
+    backbone_model_id: UUID | None = None
     annotation_schema_id: UUID | None = None
 
 
@@ -55,6 +59,8 @@ class AIModelRead(ORMModel):
     output_schema: dict | None
     output_config: dict | None
     config: dict | None
+    artifact_uri: str | None
+    backbone_model_id: UUID | None
     annotation_schema_id: UUID | None
     created_by: UUID | None
     created_at: datetime

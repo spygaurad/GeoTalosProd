@@ -76,6 +76,20 @@ class PatchService:
         return x1, y1, max(1, x2 - x1), max(1, y2 - y1)
 
     @staticmethod
+    def _evenly_subsample(values: list[int], count: int) -> list[int]:
+        """Pick ``count`` values spread evenly across ``values`` (keeping the
+        first and last), instead of just taking a prefix — so a capped axis
+        still spans the item's full extent.
+        """
+        if count >= len(values):
+            return values
+        if count <= 1:
+            return [values[0]]
+        step = (len(values) - 1) / (count - 1)
+        indices = sorted({round(i * step) for i in range(count)})
+        return [values[i] for i in indices]
+
+    @staticmethod
     def _axis_starts(length: int, patch: int, stride: int) -> list[int]:
         if length <= 0:
             return [0]
@@ -159,13 +173,26 @@ class PatchService:
 
         x_starts = cls._axis_starts(width, patch_size_px, stride)
         y_starts = cls._axis_starts(height, patch_size_px, stride)
+
+        capped = len(x_starts) * len(y_starts) > max_patches
+        if capped:
+            # Grid iteration below is row-major (all of row 0, then row 1, ...),
+            # so naively stopping at max_patches only ever covers a horizontal
+            # band near the top of the item and leaves the rest completely
+            # unscanned — exactly the "scanning only horizontally" symptom a
+            # small patch_size_m produces once the full grid exceeds the cap.
+            # Evenly subsample both axes instead, so a capped scan still
+            # covers the whole item (just more sparsely) rather than one edge
+            # of it.
+            ratio = (max_patches / (len(x_starts) * len(y_starts))) ** 0.5
+            x_starts = cls._evenly_subsample(x_starts, max(1, round(len(x_starts) * ratio)))
+            y_starts = cls._evenly_subsample(y_starts, max(1, round(len(y_starts) * ratio)))
+
         windows: list[PatchWindow] = []
-        capped = False
         patch_index = 0
         for y in y_starts:
             for x in x_starts:
                 if len(windows) >= max_patches:
-                    capped = True
                     break
                 width_px = min(patch_size_px, width - x)
                 height_px = min(patch_size_px, height - y)
@@ -191,6 +218,4 @@ class PatchService:
                     )
                 )
                 patch_index += 1
-            if capped:
-                break
         return windows, capped

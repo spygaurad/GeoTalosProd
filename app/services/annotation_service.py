@@ -15,6 +15,7 @@ from app.models.annotation import Annotation
 from app.models.annotation_class import AnnotationClass
 from app.models.annotation_schema import AnnotationSchema
 from app.models.annotation_set import AnnotationSet
+from app.models.dataset_item import DatasetItem
 from app.models.map_aoi import MapAOI
 from app.schemas.annotation import AnnotationCreate, AnnotationCreateOnMap, AnnotationUpdate
 from app.services.annotation_set_service import AnnotationSetService, _set_in_org_clause
@@ -63,6 +64,33 @@ class AnnotationService:
         if row is None:
             raise not_found("AnnotationClass")
         return row[0], row[1]
+
+    async def _resolve_dataset_item_id(
+        self,
+        organization_id: UUID,
+        *,
+        set_dataset_item_id: UUID | None,
+        payload_dataset_item_id: UUID | None,
+    ) -> UUID | None:
+        """The set's own item always wins — an annotation can't disagree with a
+        set that's scoped to one image. Only consult the payload value when the
+        set itself carries no item (dataset-wide sets, e.g. the per-map
+        verified set from verify_annotation).
+        """
+        if set_dataset_item_id is not None:
+            return set_dataset_item_id
+        if payload_dataset_item_id is None:
+            return None
+        item = await self.db.scalar(
+            select(DatasetItem).where(
+                DatasetItem.id == payload_dataset_item_id,
+                DatasetItem.organization_id == organization_id,
+                DatasetItem.is_active.is_(True),
+            )
+        )
+        if item is None:
+            raise not_found("Dataset item")
+        return item.id
 
     def _validate_geometry(
         self, geometry: dict, allowed_types: list[str] | None
@@ -142,11 +170,18 @@ class AnnotationService:
         if created_by_user_id is None and created_by_job_id is None:
             raise bad_request("Either created_by_user_id or created_by_job_id is required")
 
+        dataset_item_id = await self._resolve_dataset_item_id(
+            organization_id,
+            set_dataset_item_id=annotation_set.dataset_item_id,
+            payload_dataset_item_id=payload.dataset_item_id,
+        )
+
         data = payload.model_dump()
         data["annotation_set_id"] = set_id
         data["geometry"] = parse_geometry(payload.geometry)
         data["created_by_user_id"] = created_by_user_id
         data["created_by_job_id"] = created_by_job_id
+        data["dataset_item_id"] = dataset_item_id
         annotation = Annotation(**data)
         self.db.add(annotation)
         if created_by_user_id is not None:
@@ -168,8 +203,13 @@ class AnnotationService:
     ) -> Annotation:
         """Create an annotation with auto-resolved annotation set.
 
-        Finds or creates an annotation set for the given map + schema + user,
-        then creates the annotation within it.
+        Writes straight into the map's verified set (not a "raw, needs
+        review" manual set) — a human drawing a box on the map IS the
+        review; there's nothing further to verify. Reuses
+        ensure_verified_set/AOI-provenance stamping so a manually-drawn
+        annotation is indistinguishable from one promoted via
+        verify_annotation, including being immediately eligible for
+        training exports (geoops.dino_service only reads review_status='verified').
         """
         cls, schema = await self._get_class_and_schema(payload.class_id, organization_id)
 
@@ -179,22 +219,36 @@ class AnnotationService:
         self._validate_geometry(payload.geometry, schema.geometry_types)
 
         set_service = AnnotationSetService(self.db)
-        annotation_set = await set_service.ensure_annotation_set(
+        annotation_set, _created = await set_service.ensure_verified_set(
             map_id=map_id,
             organization_id=organization_id,
             created_by_user_id=user_id,
             schema_id=schema_id,
             dataset_id=payload.dataset_id,
-            name=payload.set_name,
+            schema_name=schema.name,
         )
+
+        dataset_item_id = await self._resolve_dataset_item_id(
+            organization_id,
+            set_dataset_item_id=annotation_set.dataset_item_id,
+            payload_dataset_item_id=payload.dataset_item_id,
+        )
+
+        aoi_meta = await self._resolve_aoi_for_geometry(map_id, organization_id, payload.geometry)
+        props = dict(payload.properties or {})
+        props["review_status"] = "verified"
+        if aoi_meta is not None:
+            props["aoi_id"] = aoi_meta["aoi_id"]
+            props["aoi_name"] = aoi_meta["aoi_name"]
 
         annotation = Annotation(
             annotation_set_id=annotation_set.id,
             class_id=payload.class_id,
             geometry=parse_geometry(payload.geometry),
             confidence=payload.confidence,
-            properties=payload.properties,
+            properties=props,
             created_by_user_id=user_id,
+            dataset_item_id=dataset_item_id,
         )
         self.db.add(annotation)
         try:

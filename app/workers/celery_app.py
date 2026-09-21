@@ -19,6 +19,9 @@ celery_app = Celery(
         "app.workers.inference.tasks",
         "app.workers.bulk.tasks",
         "app.workers.default.tasks",
+        "geoops.tasks",
+        "geoops.yolo_tasks",
+        "geoops.dino_tasks",
     ],
 )
 
@@ -37,6 +40,9 @@ celery_app.conf.update(
         "app.workers.automation.tasks.*": {"queue": "automation"},
         "app.workers.inference.tasks.*": {"queue": "inference"},
         "app.workers.default.tasks.*": {"queue": "default"},
+        "geoops.tasks.*": {"queue": "embedding"},
+        "geoops.yolo_tasks.*": {"queue": "training"},
+        "geoops.dino_tasks.*": {"queue": "training"},
 
     },
     # Beat schedule

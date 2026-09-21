@@ -301,6 +301,7 @@ def vectorize_raster_mask_set(
             Annotation(
                 annotation_set_id=target_set.id,
                 class_id=uuid.UUID(str(class_id)),
+                dataset_item_id=item.id,
                 geometry=parse_geometry(feat["geometry"]),
                 confidence=confidence,
                 properties=props or None,

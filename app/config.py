@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     # All annotation tile requests are proxied through the FastAPI tile proxy
     # so the request can be authenticated and tenant-scoped.
     MARTIN_URL: str = "http://martin:3000"
+    # geoops-service — GPU model-training/serving microservice (DINOv2 tier
+    # today). Called from geoops.dino_tasks (train/eval) and, once a head is
+    # registered, from ModelManager itself via the resulting ai_models row's
+    # endpoint_url — this setting is only for the CPU orchestration side.
+    GEOOPS_SERVICE_URL: str = "http://geoops-service:8000"
+    GEOOPS_SERVICE_API_TOKEN: str = ""
     # Public-facing API base URL — used to rewrite TiTiler tile URLs in tilejson
     # responses so browsers call the tile proxy endpoint instead of titiler directly.
     # No trailing slash. Example: https://api.example.com

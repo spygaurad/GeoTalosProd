@@ -855,6 +855,7 @@ async def get_item_bbox_preview(
     height: int = 512,
     format: str = "png",
     assets: str | None = None,
+    asset_bidx: str | None = None,
     rescale: str | None = None,
     colormap_name: str | None = None,
 ) -> bytes:
@@ -868,6 +869,8 @@ async def get_item_bbox_preview(
     params: dict[str, Any] = {}
     if assets:
         params["assets"] = assets
+    if asset_bidx:
+        params["asset_bidx"] = asset_bidx
     if rescale:
         params["rescale"] = rescale
     if colormap_name:

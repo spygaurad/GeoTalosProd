@@ -196,9 +196,38 @@ async def delete_dataset_by_id(
 # ── Dataset items ─────────────────────────────────────────────────────────────
 
 
+def _parse_items_bbox(bbox: str) -> list[float]:
+    try:
+        parts = [float(v.strip()) for v in bbox.split(",")]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="bbox must be comma-separated numbers") from exc
+    if len(parts) != 4:
+        raise HTTPException(status_code=400, detail="bbox must be minx,miny,maxx,maxy")
+    minx, miny, maxx, maxy = parts
+    if minx >= maxx or miny >= maxy:
+        raise HTTPException(status_code=400, detail="bbox must have minx < maxx and miny < maxy")
+    return parts
+
+
+def _item_geometry_intersects_bbox(geometry: dict | None, bbox_4326: list[float]) -> bool:
+    if not geometry:
+        return False
+    from shapely.geometry import box, shape  # noqa: PLC0415
+
+    try:
+        return shape(geometry).intersects(box(*bbox_4326))
+    except Exception:
+        return False
+
+
 @router.get("/{dataset_id}/items", response_model=DatasetItemListResponse)
 async def list_dataset_items(
     dataset_id: UUID,
+    bbox: str | None = Query(
+        default=None,
+        description="Optional minx,miny,maxx,maxy (EPSG:4326) — only items whose geometry "
+        "intersects this are returned. Without it, results are unfiltered chronological.",
+    ),
     limit: int = Depends(limit_param),
     offset: int = Depends(offset_param),
     org_id: UUID = Depends(require_org_role("org:viewer")),
@@ -220,6 +249,25 @@ async def list_dataset_items(
         select(DatasetItem)
         .where(DatasetItem.dataset_id == dataset_id, DatasetItem.is_active.is_(True))
     )
+
+    if bbox is not None:
+        # DatasetItem.geometry is plain JSONB (not a PostGIS column — see
+        # geoops/service.py's docstring on the same design choice), so the
+        # intersection test has to happen in Python rather than via ST_*
+        # SQL, same pattern as the maps-scoped in-aoi endpoints
+        # (_geometry_intersects_bbox in maps.py/map_aois.py). Unlike those,
+        # this endpoint has no map/MapLayer context to scope by, so it
+        # fetches every active item in the dataset rather than a
+        # map-linked subset — fine at current dataset sizes (tens to low
+        # hundreds of items), revisit if that stops being true.
+        bbox_4326 = _parse_items_bbox(bbox)
+        all_items = (await db.scalars(
+            base_q.order_by(DatasetItem.item_datetime.asc().nullslast(), DatasetItem.created_at.asc())
+        )).all()
+        matched = [item for item in all_items if _item_geometry_intersects_bbox(item.geometry, bbox_4326)]
+        page = matched[offset : offset + limit]
+        return DatasetItemListResponse(items=page, total=len(matched), limit=limit, offset=offset)
+
     total_result = await db.execute(
         base_q.with_only_columns(__import__("sqlalchemy").func.count())
     )

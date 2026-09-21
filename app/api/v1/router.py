@@ -1,6 +1,8 @@
 from fastapi import APIRouter
 
 from geoops.api import router as embeddings_router
+from geoops.dino_api import router as dino_router
+from geoops.yolo_api import router as yolo_router
 
 from app.api.v1.endpoints import (
     adapters,
@@ -68,3 +70,5 @@ api_router.include_router(automation.router)
 api_router.include_router(storage_download.router)
 api_router.include_router(events.router)
 api_router.include_router(embeddings_router)
+api_router.include_router(yolo_router)
+api_router.include_router(dino_router)

@@ -36,6 +36,7 @@ class JobType(StrEnum):
     IMPORT_ANNOTATIONS = "import_annotations"
     VECTORIZE_RASTER_MASK = "vectorize_raster_mask"
     RASTERIZE_ANNOTATION_SET = "rasterize_annotation_set"
+    CONVERT_TO_COG = "convert_to_cog"
 
 
 class MapLayerSourceType(StrEnum):

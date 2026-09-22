@@ -171,6 +171,34 @@ def initiate_upload(
     return key, resp["UploadId"]
 
 
+def copy_object(
+    org_id: uuid.UUID,
+    source_key: str,
+    dest_key: str,
+    content_type: str = "image/tiff",
+) -> None:
+    """Server-side copy within the org bucket (used to clone already-COG rasters).
+
+    Overwrites ``dest_key`` if it already exists. Same-bucket only — callers
+    must not pass a key from another organization.
+    """
+    if not source_key:
+        raise ValueError("copy_object requires source_key")
+    if not dest_key:
+        raise ValueError("copy_object requires dest_key")
+    if source_key == dest_key:
+        return
+    client = _s3_client()
+    name = bucket_name(org_id)
+    client.copy_object(
+        Bucket=name,
+        Key=dest_key,
+        CopySource={"Bucket": name, "Key": source_key},
+        ContentType=content_type,
+        MetadataDirective="REPLACE",
+    )
+
+
 def upload_from_path(org_id: uuid.UUID, s3_key: str, file_path: str, content_type: str = "image/tiff") -> None:
     """Upload a local file to S3/MinIO as a single PUT (used by Celery workers).
 

@@ -5,15 +5,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_session, require_org_role
-from app.core.enums import JobStatus, JobType
+from app.core.enums import DatasetStatus, JobStatus, JobType
 from app.models.ai_model import AIModel
 from app.models.annotation_class import AnnotationClass
+from app.models.dataset import Dataset
 from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.models.map import Map
 from app.models.project import Project
 from app.models.user import User
-from app.schemas.job import InferenceJobCreate, JobRead
+from app.schemas.job import ConvertToCogJobCreate, InferenceJobCreate, JobRead
 from app.services.job_service import JobService
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -139,6 +140,106 @@ async def _create_inference_job(
 
     run_inference_batch.apply_async(args=[str(job.id)])
     return job
+
+
+async def _create_convert_to_cog_job(
+    payload: ConvertToCogJobCreate,
+    *,
+    org_id: UUID,
+    db: AsyncSession,
+    current_user: User,
+) -> Job:
+    dataset = await db.scalar(
+        select(Dataset).where(
+            Dataset.id == payload.dataset_id,
+            Dataset.organization_id == org_id,
+            Dataset.deleted_at.is_(None),
+        )
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if dataset.status == DatasetStatus.INGESTING:
+        raise HTTPException(
+            status_code=409,
+            detail="Dataset is currently ingesting and cannot be converted",
+        )
+
+    item_query = select(DatasetItem).where(
+        DatasetItem.dataset_id == dataset.id,
+        DatasetItem.organization_id == org_id,
+        DatasetItem.is_active.is_(True),
+    )
+    requested_ids = payload.dataset_item_ids
+    if requested_ids:
+        item_query = item_query.where(DatasetItem.id.in_(requested_ids))
+    found = (await db.scalars(item_query)).all()
+    if requested_ids and len(found) != len(set(requested_ids)):
+        raise HTTPException(
+            status_code=404, detail="One or more dataset items were not found"
+        )
+    if not found:
+        raise HTTPException(
+            status_code=422, detail="Dataset has no active raster items to convert"
+        )
+
+    if payload.project_id is not None:
+        project = await db.scalar(
+            select(Project).where(
+                Project.id == payload.project_id,
+                Project.organization_id == org_id,
+                Project.deleted_at.is_(None),
+            )
+        )
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    resolved_item_ids = [str(item.id) for item in found]
+    job = Job(
+        organization_id=org_id,
+        type=JobType.CONVERT_TO_COG,
+        status=JobStatus.QUEUED,
+        config={
+            "trigger": "api",
+            "source_dataset_id": str(dataset.id),
+            "dataset_item_ids": resolved_item_ids,
+            "dataset_name": (payload.dataset_name or "").strip() or None,
+            "project_id": str(payload.project_id) if payload.project_id else None,
+        },
+        input_refs=[{"type": "dataset", "id": str(dataset.id)}],
+        created_by_user_id=current_user.id,
+        total_items=len(found),
+        processed_items=0,
+        failed_items=0,
+        progress=0.0,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    from app.workers.ingestion.tasks import convert_dataset_to_cog  # noqa: PLC0415
+
+    convert_dataset_to_cog.apply_async(args=[str(job.id)])
+    return job
+
+
+@router.post("/convert-to-cog", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+async def create_convert_to_cog_job(
+    payload: ConvertToCogJobCreate,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Convert a dataset's GeoTIFFs into a sibling Cloud-Optimized GeoTIFF dataset.
+
+    Does not modify the source dataset. Poll ``GET /jobs/{job_id}`` for progress;
+    on success ``config.result.dataset_id`` is the new dataset.
+    """
+    return await _create_convert_to_cog_job(
+        payload,
+        org_id=org_id,
+        db=db,
+        current_user=current_user,
+    )
 
 
 @router.post("/inference", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)

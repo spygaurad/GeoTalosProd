@@ -68,6 +68,8 @@ def _reset_orphaned_running_jobs(sender, **kwargs):
     because the Celery task is lost but the DB row isn't updated.
     Only affects jobs that started more than 10 minutes ago to avoid racing
     with a legitimately in-progress task on another worker instance.
+    ``convert_to_cog`` is excluded: large raster conversions can exceed 10
+    minutes and must not be failed when a sibling worker process starts.
     """
     from sqlalchemy import text
     from app.workers.db import WorkerSession
@@ -83,6 +85,7 @@ def _reset_orphaned_running_jobs(sender, **kwargs):
                         finished_at = NOW()
                     WHERE status = 'running'
                       AND started_at < NOW() - INTERVAL '10 minutes'
+                      AND type <> 'convert_to_cog'
                     RETURNING id
                 """)
             )

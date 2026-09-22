@@ -192,6 +192,60 @@ def _prepare_zip_member_raster(
     return f"s3://{bucket}/{extracted_key}"
 
 
+def _s3_key_from_uri(s3_uri: str) -> str:
+    if not s3_uri or not s3_uri.startswith("s3://"):
+        raise PermanentTaskError(f"Expected s3:// URI, got {s3_uri!r}")
+    rest = s3_uri[5:]
+    slash = rest.find("/")
+    if slash < 0 or slash == len(rest) - 1:
+        raise PermanentTaskError(f"s3 URI missing object key: {s3_uri!r}")
+    return rest[slash + 1 :]
+
+
+def _standalone_cog_object_key(
+    output_dataset_id: uuid.UUID,
+    source_item_id: uuid.UUID,
+    filename: str,
+) -> str:
+    return storage_service.object_key(
+        output_dataset_id,
+        f"processed/{source_item_id}_{_safe_raster_stem(filename)}_cog.tif",
+    )
+
+
+def _materialize_standalone_cog(
+    *,
+    organization_id: uuid.UUID,
+    output_dataset_id: uuid.UUID,
+    source_item_id: uuid.UUID,
+    s3_uri: str,
+    filename: str,
+    gdal_env: dict,
+) -> tuple[str, bool]:
+    """Copy or convert a source raster onto a new key under the output dataset.
+
+    Returns ``(dest_s3_uri, was_already_cog)``. Temp files are always removed.
+    """
+    dest_key = _standalone_cog_object_key(output_dataset_id, source_item_id, filename)
+    bucket = storage_service.bucket_name(organization_id)
+    dest_uri = f"s3://{bucket}/{dest_key}"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_out = os.path.join(tmpdir, f"{_safe_raster_stem(filename)}_cog.tif")
+        converted = _convert_if_not_cog(s3_uri, tmp_out, gdal_env)
+        if converted:
+            storage_service.upload_from_path(
+                organization_id, dest_key, tmp_out, content_type="image/tiff"
+            )
+            logger.info("cog_uploaded src=%s dest=%s", s3_uri, dest_uri)
+            return dest_uri, False
+
+    storage_service.copy_object(
+        organization_id, _s3_key_from_uri(s3_uri), dest_key
+    )
+    logger.info("cog_copied src=%s dest=%s", s3_uri, dest_uri)
+    return dest_uri, True
+
+
 def _deterministic_item_id(s3_uri: str) -> str:
     return hashlib.md5(s3_uri.encode()).hexdigest()
 
@@ -1357,6 +1411,374 @@ def rasterize_annotation_set(self, job_id: str) -> None:
 
     # Resume the automation pipeline after the session closes so the follow-up
     # step reads committed Job/Dataset state.
+    if automation_run_id and automation_step_id and output_data is not None:
+        from app.workers.automation.tasks import resume_after_job  # noqa: PLC0415
+
+        resume_after_job.delay(job_id, output_data)
+
+
+def _active_source_items(
+    session,
+    *,
+    dataset_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    item_ids: list[uuid.UUID] | None,
+) -> list[DatasetItem]:
+    from sqlalchemy import select as sync_select  # noqa: PLC0415
+
+    q = sync_select(DatasetItem).where(
+        DatasetItem.dataset_id == dataset_id,
+        DatasetItem.organization_id == organization_id,
+        DatasetItem.is_active.is_(True),
+    )
+    if item_ids:
+        q = q.where(DatasetItem.id.in_(item_ids))
+    return list(session.execute(q).scalars().all())
+
+
+def _output_items_by_source_id(session, output_dataset_id: uuid.UUID) -> dict[str, DatasetItem]:
+    from sqlalchemy import select as sync_select  # noqa: PLC0415
+
+    rows = session.execute(
+        sync_select(DatasetItem).where(
+            DatasetItem.dataset_id == output_dataset_id,
+            DatasetItem.is_active.is_(True),
+        )
+    ).scalars().all()
+    mapping: dict[str, DatasetItem] = {}
+    for row in rows:
+        sid = (row.properties_cache or {}).get("source_item_id")
+        if sid:
+            mapping[str(sid)] = row
+    return mapping
+
+
+def _get_or_create_convert_output_dataset(session, job, cfg: dict, source: Dataset) -> Dataset:
+    existing_id = cfg.get("output_dataset_id")
+    if existing_id:
+        ds = session.get(Dataset, uuid.UUID(str(existing_id)))
+        if ds is None:
+            raise PermanentTaskError(
+                f"output dataset {existing_id} recorded on job but not found"
+            )
+        if ds.organization_id != job.organization_id:
+            raise PermanentTaskError("output dataset organization mismatch")
+        if ds.status != DatasetStatus.INGESTING:
+            ds.status = DatasetStatus.INGESTING
+        return ds
+
+    output = Dataset(
+        id=uuid.uuid4(),
+        organization_id=job.organization_id,
+        name=(cfg.get("dataset_name") or "").strip() or f"{source.name} · COG",
+        description=source.description,
+        dataset_type=source.dataset_type,
+        status=DatasetStatus.INGESTING,
+        created_by=job.created_by_user_id,
+    )
+    session.add(output)
+    session.flush()
+    cfg["output_dataset_id"] = str(output.id)
+    job.config = dict(cfg)
+    session.commit()
+    return output
+
+
+def _stac_item_with_source_rendering(source_item: DatasetItem, stac_item: dict) -> dict:
+    item = dict(stac_item)
+    props = dict(item.get("properties") or {})
+    src_props = source_item.properties_cache or {}
+    if isinstance(src_props, dict) and src_props.get("rendering_config"):
+        props["rendering_config"] = dict(src_props["rendering_config"])
+    props["source_item_id"] = str(source_item.id)
+    item["properties"] = props
+    return item
+
+
+def _merge_source_rendering_metadata(source: Dataset, agg_meta: dict) -> dict:
+    meta = dict(agg_meta or {})
+    src_meta = dict(source.metadata_ or {})
+    src_rc = dict(src_meta.get("rendering_config") or {})
+    agg_rc = dict(meta.get("rendering_config") or {})
+    if src_rc:
+        meta["rendering_config"] = {**agg_rc, **src_rc}
+    elif agg_rc:
+        meta["rendering_config"] = agg_rc
+    return meta
+
+
+@celery_app.task(bind=True, queue=INGESTION, max_retries=2, default_retry_delay=60)
+def convert_dataset_to_cog(self, job_id: str) -> None:
+    """Convert a source dataset's rasters into a sibling COG dataset.
+
+    Reads ``job.config``:
+
+    ``source_dataset_id``   required
+    ``dataset_item_ids``    optional subset; otherwise all active items
+    ``dataset_name``        optional output name (default ``'{source} · COG'``)
+    ``output_dataset_id``   persisted on first run and reused on Celery retry
+    ``project_id``          optional ProjectDataset link on success
+    ``automation_run_id``/``automation_step_id``  resume a waiting pipeline step
+
+    The source Dataset is never modified. Output stays ``ingesting`` until every
+    selected item is copied/converted, registered in MinIO + pgSTAC + DatasetItem,
+    and aggregated metadata is written.
+    """
+    from sqlalchemy import select as sync_select  # noqa: PLC0415
+
+    from app.models.job_output import JobOutput
+    from app.models.project_dataset import ProjectDataset
+
+    job_uuid = uuid.UUID(job_id)
+    output_data: dict | None = None
+    automation_run_id = automation_step_id = None
+
+    with WorkerSession() as session:
+        job = session.get(Job, job_uuid)
+        if job is None:
+            logger.error("convert_dataset_to_cog: job %s not found", job_id)
+            return
+        cfg = dict(job.config or {})
+        automation_run_id = cfg.get("automation_run_id")
+        automation_step_id = cfg.get("automation_step_id")
+        try:
+            job.status = JobStatus.RUNNING
+            job.started_at = job.started_at or _now()
+            session.commit()
+
+            source_id = cfg.get("source_dataset_id")
+            if not source_id:
+                raise PermanentTaskError("job.config.source_dataset_id is required")
+            source = session.get(Dataset, uuid.UUID(str(source_id)))
+            if source is None or source.deleted_at is not None:
+                raise PermanentTaskError("source dataset not found")
+            if source.organization_id != job.organization_id:
+                raise PermanentTaskError(
+                    "Job and dataset organization mismatch — refusing conversion"
+                )
+
+            configured_ids = [
+                uuid.UUID(str(i)) for i in (cfg.get("dataset_item_ids") or []) if i
+            ]
+            items = _active_source_items(
+                session,
+                dataset_id=source.id,
+                organization_id=job.organization_id,
+                item_ids=configured_ids or None,
+            )
+            if configured_ids and len(items) != len(set(configured_ids)):
+                raise PermanentTaskError("one or more dataset items were not found")
+            if not items:
+                raise PermanentTaskError("source dataset has no active raster items")
+
+            job.total_items = len(items)
+            job.processed_items = 0
+            job.failed_items = 0
+            job.progress = 0.0
+            session.commit()
+
+            output = _get_or_create_convert_output_dataset(session, job, cfg, source)
+            cfg = dict(job.config or cfg)
+            already_done = _output_items_by_source_id(session, output.id)
+
+            gdal_env = _gdal_env_for_worker()
+            storage_service.ensure_org_bucket(job.organization_id)
+            collection = _ensure_collection(session, output, job.organization_id)
+
+            failed_files: list[str] = []
+            prepared: list[tuple[DatasetItem, str, bool, str, dict]] = []
+            skipped_already_cog = 0
+            converted_count = 0
+
+            for idx, source_item in enumerate(items):
+                existing = already_done.get(str(source_item.id))
+                if existing is not None:
+                    was_cog = bool((existing.properties_cache or {}).get("was_already_cog"))
+                    prepared.append(
+                        (
+                            source_item,
+                            existing.s3_uri,
+                            was_cog,
+                            existing.stac_item_id,
+                            {
+                                "geometry": existing.geometry,
+                                "properties": existing.properties_cache or {},
+                            },
+                        )
+                    )
+                    if was_cog:
+                        skipped_already_cog += 1
+                    else:
+                        converted_count += 1
+                    job.processed_items = idx + 1
+                    job.progress = job.processed_items / job.total_items
+                    session.commit()
+                    continue
+                try:
+                    dest_uri, was_already_cog = _materialize_standalone_cog(
+                        organization_id=job.organization_id,
+                        output_dataset_id=output.id,
+                        source_item_id=source_item.id,
+                        s3_uri=source_item.s3_uri,
+                        filename=source_item.filename,
+                        gdal_env=gdal_env,
+                    )
+                    success, issues, item_id, stac_item = _prepare_single_cog(
+                        dest_uri,
+                        source_item.filename,
+                        collection,
+                        gdal_env,
+                        output.dataset_type,
+                    )
+                    if not success or stac_item is None or item_id is None:
+                        failed_files.append(
+                            f"{source_item.filename}: {'; '.join(issues) or 'COG validation failed'}"
+                        )
+                    else:
+                        stac_item = _stac_item_with_source_rendering(source_item, stac_item)
+                        stac_item["properties"]["was_already_cog"] = was_already_cog
+                        prepared.append(
+                            (source_item, dest_uri, was_already_cog, item_id, stac_item)
+                        )
+                        if was_already_cog:
+                            skipped_already_cog += 1
+                        else:
+                            converted_count += 1
+                except PermanentTaskError as exc:
+                    failed_files.append(f"{source_item.filename}: {exc}")
+                job.processed_items = idx + 1
+                job.failed_items = len(failed_files)
+                job.progress = job.processed_items / job.total_items
+                session.commit()
+
+            if failed_files:
+                job.logs = "\n".join(failed_files)[:4000]
+                raise PermanentTaskError(
+                    f"{len(failed_files)} of {len(items)} item(s) failed conversion"
+                )
+
+            new_stac = []
+            for source_item, _uri, _cog, _iid, stac_item in prepared:
+                if str(source_item.id) not in already_done:
+                    new_stac.append(stac_item)
+            if new_stac:
+                batch_upsert_stac_items(new_stac, settings.STAC_SYNC_DATABASE_URL)
+
+            result_items = []
+            for source_item, dest_uri, was_already_cog, item_id, stac_item in prepared:
+                if str(source_item.id) not in already_done:
+                    _upsert_dataset_item(
+                        session,
+                        dataset_id=output.id,
+                        organization_id=job.organization_id,
+                        stac_item_id=item_id,
+                        stac_collection_id=collection,
+                        s3_uri=dest_uri,
+                        filename=source_item.filename,
+                        stac_item=stac_item,
+                    )
+                result_items.append(
+                    {
+                        "source_item_id": str(source_item.id),
+                        "filename": source_item.filename,
+                        "s3_uri": dest_uri,
+                        "was_already_cog": was_already_cog,
+                    }
+                )
+
+            agg = _compute_aggregated_metadata(output.stac_collection_id)
+            if agg is None:
+                raise PermanentTaskError(
+                    f"Conversion completed but no items found in pgSTAC for "
+                    f"collection {output.stac_collection_id!r}."
+                )
+            output.metadata_ = _merge_source_rendering_metadata(
+                source, dict(agg.get("metadata") or {})
+            )
+            if agg.get("wkt"):
+                output.geometry = WKTElement(agg["wkt"], srid=4326)
+            if agg.get("start_date") and agg.get("end_date"):
+                output.temporal_extent = DateTimeTZRange(
+                    agg["start_date"], agg["end_date"], bounds="[]"
+                )
+            output.status = DatasetStatus.READY
+
+            project_id = cfg.get("project_id")
+            if project_id:
+                proj_uuid = uuid.UUID(str(project_id))
+                existing_link = session.get(ProjectDataset, (proj_uuid, output.id))
+                if existing_link is None:
+                    session.add(
+                        ProjectDataset(
+                            project_id=proj_uuid,
+                            dataset_id=output.id,
+                            linked_by=job.created_by_user_id,
+                        )
+                    )
+
+            existing_output = session.execute(
+                sync_select(JobOutput).where(
+                    JobOutput.job_id == job.id,
+                    JobOutput.output_id == output.id,
+                )
+            ).scalar_one_or_none()
+            if existing_output is None:
+                session.add(
+                    JobOutput(
+                        job_id=job.id,
+                        output_type="dataset",
+                        output_id=output.id,
+                    )
+                )
+
+            cfg["result"] = {
+                "source_dataset_id": str(source.id),
+                "dataset_id": str(output.id),
+                "converted_count": converted_count,
+                "skipped_already_cog": skipped_already_cog,
+                "failed_count": 0,
+                "items": result_items,
+            }
+            job.config = dict(cfg)
+            job.processed_items = len(items)
+            job.failed_items = 0
+            job.progress = 1.0
+            job.status = JobStatus.COMPLETED
+            job.finished_at = _now()
+            session.commit()
+            _publish_job_event(job)
+            logger.info(
+                "convert_dataset_to_cog done job=%s source=%s output=%s items=%d",
+                job_id, source.id, output.id, len(items),
+            )
+            output_data = {
+                "dataset": {
+                    "id": str(output.id),
+                    "name": output.name,
+                    "dataset_type": output.dataset_type,
+                }
+            }
+        except PermanentTaskError as exc:
+            session.rollback()
+            job = session.get(Job, job_uuid)
+            if job is not None:
+                fail_cfg = dict(job.config or {})
+                job.status = JobStatus.FAILED
+                job.logs = str(exc)[:4000]
+                job.finished_at = _now()
+                out_id = fail_cfg.get("output_dataset_id")
+                if out_id:
+                    failed_ds = session.get(Dataset, uuid.UUID(str(out_id)))
+                    if failed_ds is not None and failed_ds.status != DatasetStatus.READY:
+                        failed_ds.status = DatasetStatus.FAILED
+                session.commit()
+                _publish_job_event(job)
+            logger.error("convert_dataset_to_cog permanent failure job=%s: %s", job_id, exc)
+        except Exception as exc:
+            session.rollback()
+            logger.exception("convert_dataset_to_cog transient error job=%s", job_id)
+            raise self.retry(exc=exc)
+
     if automation_run_id and automation_step_id and output_data is not None:
         from app.workers.automation.tasks import resume_after_job  # noqa: PLC0415
 

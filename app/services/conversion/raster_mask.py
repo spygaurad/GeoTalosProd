@@ -21,19 +21,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.services.conversion.polygonize import (
+    _normalize_value as _normalize_value,
+    _polygonize_prepared,
+    _prepare_value_class_map,
+)
 from app.workers.ingestion.rasterio_utils import _vsi_path
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_value(value: float) -> str:
-    """Match the key normalization used when the value->class map was stored.
-
-    Mirrors ``_coerce_value_map`` in the annotation-sets endpoint: integral
-    values become ``"5"``, non-integral stay ``"5.5"`` — so lookups against a
-    stored ``value_class_map`` hit the same keys.
-    """
-    return str(int(value)) if float(value).is_integer() else str(float(value))
 
 
 def raster_mask_to_features(
@@ -69,29 +64,15 @@ def raster_mask_to_features(
     Returns:
         A list of GeoJSON Feature dicts in EPSG:4326.
     """
-    import numpy as np
     import rasterio
     from rasterio.env import Env
-    from rasterio.features import shapes
-    from rasterio.warp import transform_geom
-    from shapely.geometry import shape as shapely_shape
 
-    norm_map: dict[str, str] = {str(k).strip(): str(v) for k, v in (value_class_map or {}).items()}
-    if not norm_map:
+    prepared = _prepare_value_class_map(value_class_map, connectivity)
+    if prepared is None:
         return []
-    if connectivity not in (4, 8):
-        raise ValueError("connectivity must be 4 or 8")
-
-    mapped_numeric: list[float] = []
-    for key in norm_map:
-        try:
-            mapped_numeric.append(float(key))
-        except ValueError:
-            logger.warning("raster_mask: non-numeric value_class_map key skipped key=%r", key)
+    norm_map, mapped_numeric = prepared
 
     vsi = _vsi_path(s3_uri)
-    features: list[dict] = []
-
     with Env(**gdal_env):
         with rasterio.open(vsi) as src:
             if band_index < 1 or band_index > src.count:
@@ -103,52 +84,19 @@ def raster_mask_to_features(
             transform = src.transform
             file_nodata = src.nodata
 
-    pixel_area = abs(transform.a * transform.e) or 1.0
     nodata = nodata_value if nodata_value is not None else file_nodata
-
-    # Only vectorize mapped values; exclude nodata background.
-    valid = np.isin(band, mapped_numeric) if mapped_numeric else np.zeros(band.shape, dtype=bool)
-    if nodata is not None:
-        valid &= band != nodata
-    if not valid.any():
-        return []
-
-    need_reproject = src_crs is not None and src_crs.to_epsg() != 4326
-
-    for geom, raster_value in shapes(band, mask=valid, transform=transform, connectivity=connectivity):
-        class_id = norm_map.get(_normalize_value(float(raster_value)))
-        if class_id is None:
-            continue
-
-        shp = shapely_shape(geom)
-        if min_area_px > 0 and (shp.area / pixel_area) < min_area_px:
-            continue
-        if simplify_tolerance and simplify_tolerance > 0:
-            shp = shp.simplify(simplify_tolerance, preserve_topology=True)
-        if shp.is_empty:
-            continue
-        if not shp.is_valid:
-            shp = shp.buffer(0)
-            if shp.is_empty:
-                continue
-
-        geom_out = shp.__geo_interface__
-        if need_reproject:
-            geom_out = transform_geom(src_crs, "EPSG:4326", geom_out)
-
-        features.append(
-            {
-                "type": "Feature",
-                "geometry": geom_out,
-                "properties": {
-                    "class_id": class_id,
-                    "raster_value": float(raster_value),
-                    "source": "raster_mask_vectorize",
-                },
-            }
-        )
-
-    return features
+    return _polygonize_prepared(
+        band,
+        transform,
+        src_crs,
+        norm_map,
+        mapped_numeric,
+        nodata=nodata,
+        simplify_tolerance=simplify_tolerance,
+        min_area_px=min_area_px,
+        connectivity=connectivity,
+        source_tag="raster_mask_vectorize",
+    )
 
 
 def dissolve_features_by_class(features: list[dict]) -> list[dict]:

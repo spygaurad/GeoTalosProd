@@ -7,6 +7,7 @@ here as conversion/formatting needs arise (this module is expected to grow).
 
 Currently provides:
 - ``cog``: GeoTIFF -> COG
+- ``polygonize``: in-memory class-mask array -> GeoJSON features
 - ``raster_mask``: raster segmentation mask (COG) -> vector annotations, so a
   raster ground-truth set becomes comparable to vector model predictions for
   IoU / precision / recall metrics.
@@ -18,6 +19,7 @@ Currently provides:
 """
 
 from app.services.conversion.cog import convert_geotiff_to_cog
+from app.services.conversion.polygonize import mask_array_to_features
 from app.services.conversion.raster_mask import (
     RasterMaskVectorizeResult,
     dissolve_features_by_class,
@@ -42,6 +44,7 @@ __all__ = [
     "compare_raster_masks",
     "convert_geotiff_to_cog",
     "dissolve_features_by_class",
+    "mask_array_to_features",
     "raster_mask_to_features",
     "rasterize_annotation_sets_to_cog",
     "vectorize_raster_mask_set",

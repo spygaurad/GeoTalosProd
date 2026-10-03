@@ -1783,3 +1783,233 @@ def convert_dataset_to_cog(self, job_id: str) -> None:
         from app.workers.automation.tasks import resume_after_job  # noqa: PLC0415
 
         resume_after_job.delay(job_id, output_data)
+
+
+def _live_annotation_count(session, annotation_set_id: uuid.UUID) -> int:
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from app.models.annotation import Annotation  # noqa: PLC0415
+
+    value = session.scalar(
+        select(func.count()).select_from(Annotation).where(
+            Annotation.annotation_set_id == annotation_set_id,
+            Annotation.deleted_at.is_(None),
+        )
+    )
+    return int(value or 0)
+
+
+def _finish_extract_raster_features(
+    session,
+    job,
+    cfg: dict,
+    *,
+    annotation_set_id: uuid.UUID,
+    feature_count: int,
+    band_index: int,
+    threshold_min: float,
+    threshold_max: float | None,
+) -> dict:
+    from sqlalchemy import select as sync_select  # noqa: PLC0415
+
+    from app.models.job_output import JobOutput  # noqa: PLC0415
+
+    set_id = uuid.UUID(str(annotation_set_id))
+    existing_output = session.execute(
+        sync_select(JobOutput).where(
+            JobOutput.job_id == job.id,
+            JobOutput.output_id == set_id,
+        )
+    ).scalar_one_or_none()
+    if existing_output is None:
+        session.add(
+            JobOutput(
+                job_id=job.id,
+                output_type="annotation_set",
+                output_id=set_id,
+            )
+        )
+
+    finished = dict(cfg)
+    finished["output_annotation_set_id"] = str(set_id)
+    finished["result"] = {
+        "annotation_set_id": str(set_id),
+        "feature_count": int(feature_count),
+        "method": "threshold",
+        "index": "band",
+        "band_index": band_index,
+        "threshold_min": threshold_min,
+        "threshold_max": threshold_max,
+    }
+    job.config = finished
+    job.total_items = 1
+    job.processed_items = 1
+    job.failed_items = 0
+    job.progress = 1.0
+    job.status = JobStatus.COMPLETED
+    job.finished_at = _now()
+    session.commit()
+    _publish_job_event(job)
+    return {
+        "annotation_set": {
+            "id": str(set_id),
+            "feature_count": int(feature_count),
+        }
+    }
+
+
+@celery_app.task(bind=True, queue=INGESTION, max_retries=2, default_retry_delay=60)
+def extract_raster_features(self, job_id: str) -> None:
+    """Threshold one imagery band into a new analysis AnnotationSet."""
+    from pydantic import ValidationError  # noqa: PLC0415
+
+    from app.core.enums import JobType  # noqa: PLC0415
+    from app.models.annotation_class import AnnotationClass  # noqa: PLC0415
+    from app.models.annotation_schema import AnnotationSchema  # noqa: PLC0415
+    from app.models.annotation_set import AnnotationSet  # noqa: PLC0415
+    from app.schemas.job import ExtractRasterFeaturesJobCreate  # noqa: PLC0415
+    from app.services.conversion.raster_mask import dissolve_features_by_class  # noqa: PLC0415
+    from app.services.conversion.threshold_extract import (  # noqa: PLC0415
+        persist_threshold_features,
+        threshold_raster_to_features,
+    )
+
+    job_uuid = uuid.UUID(job_id)
+    output_data: dict | None = None
+    automation_run_id = automation_step_id = None
+
+    with WorkerSession() as session:
+        job = session.get(Job, job_uuid)
+        if job is None:
+            logger.error("extract_raster_features: job %s not found", job_id)
+            return
+        cfg = dict(job.config or {})
+        automation_run_id = cfg.get("automation_run_id")
+        automation_step_id = cfg.get("automation_step_id")
+        try:
+            job.status = JobStatus.RUNNING
+            job.started_at = job.started_at or _now()
+            session.commit()
+
+            if job.type != JobType.EXTRACT_RASTER_FEATURES:
+                raise PermanentTaskError(
+                    f"job type {job.type!r} is not extract_raster_features"
+                )
+            try:
+                payload = ExtractRasterFeaturesJobCreate.model_validate(cfg)
+            except ValidationError as exc:
+                raise PermanentTaskError(f"invalid extract config: {exc}") from exc
+
+            existing_id = cfg.get("output_annotation_set_id")
+            if existing_id:
+                existing = session.get(AnnotationSet, uuid.UUID(str(existing_id)))
+                if existing is None or existing.deleted_at is not None:
+                    raise PermanentTaskError("stored output annotation set was not found")
+                if existing.organization_id != job.organization_id:
+                    raise PermanentTaskError(
+                        "stored output annotation set organization mismatch"
+                    )
+                output_data = _finish_extract_raster_features(
+                    session,
+                    job,
+                    cfg,
+                    annotation_set_id=existing.id,
+                    feature_count=_live_annotation_count(session, existing.id),
+                    band_index=payload.band_index,
+                    threshold_min=payload.threshold_min,
+                    threshold_max=payload.threshold_max,
+                )
+            else:
+                if job.created_by_user_id is None:
+                    raise PermanentTaskError("job.created_by_user_id is required")
+
+                item = session.get(DatasetItem, payload.dataset_item_id)
+                if item is None or not item.is_active:
+                    raise PermanentTaskError("dataset item not found")
+                if item.organization_id != job.organization_id:
+                    raise PermanentTaskError(
+                        "Job and dataset item organization mismatch — refusing extract"
+                    )
+
+                dataset = session.get(Dataset, item.dataset_id)
+                if dataset is None or dataset.deleted_at is not None:
+                    raise PermanentTaskError("parent dataset not found")
+                if dataset.organization_id != job.organization_id:
+                    raise PermanentTaskError(
+                        "Job and dataset organization mismatch — refusing extract"
+                    )
+
+                schema = session.get(AnnotationSchema, payload.schema_id)
+                if schema is None or schema.deleted_at is not None:
+                    raise PermanentTaskError("annotation schema not found")
+                if schema.organization_id != job.organization_id:
+                    raise PermanentTaskError(
+                        "Job and schema organization mismatch — refusing extract"
+                    )
+                ann_class = session.get(AnnotationClass, payload.output_class_id)
+                if ann_class is None or ann_class.schema_id != schema.id:
+                    raise PermanentTaskError("output_class_id does not belong to the schema")
+
+                try:
+                    features = threshold_raster_to_features(
+                        item,
+                        _gdal_env_for_worker(),
+                        threshold_min=payload.threshold_min,
+                        output_class_id=str(payload.output_class_id),
+                        threshold_max=payload.threshold_max,
+                        band_index=payload.band_index,
+                        min_area_px=payload.min_area_px,
+                        simplify_tolerance=payload.simplify_tolerance,
+                        connectivity=payload.connectivity,
+                        index=payload.index,
+                    )
+                except ValueError as exc:
+                    raise PermanentTaskError(str(exc)) from exc
+                if payload.dissolve:
+                    features = dissolve_features_by_class(features)
+
+                persisted = persist_threshold_features(
+                    session,
+                    features,
+                    item,
+                    schema_id=payload.schema_id,
+                    output_class_id=payload.output_class_id,
+                    created_by_user_id=job.created_by_user_id,
+                    name=payload.annotation_set_name,
+                    commit=False,
+                )
+                output_data = _finish_extract_raster_features(
+                    session,
+                    job,
+                    cfg,
+                    annotation_set_id=persisted.annotation_set_id,
+                    feature_count=persisted.feature_count,
+                    band_index=payload.band_index,
+                    threshold_min=payload.threshold_min,
+                    threshold_max=payload.threshold_max,
+                )
+            logger.info(
+                "extract_raster_features done job=%s set=%s features=%s",
+                job_id,
+                output_data["annotation_set"]["id"],
+                output_data["annotation_set"]["feature_count"],
+            )
+        except PermanentTaskError as exc:
+            session.rollback()
+            job = session.get(Job, job_uuid)
+            if job is not None:
+                job.status = JobStatus.FAILED
+                job.logs = str(exc)[:4000]
+                job.finished_at = _now()
+                session.commit()
+                _publish_job_event(job)
+            logger.error("extract_raster_features permanent failure job=%s: %s", job_id, exc)
+        except Exception as exc:
+            session.rollback()
+            logger.exception("extract_raster_features transient error job=%s", job_id)
+            raise self.retry(exc=exc)
+
+    if automation_run_id and automation_step_id and output_data is not None:
+        from app.workers.automation.tasks import resume_after_job  # noqa: PLC0415
+
+        resume_after_job.delay(job_id, output_data)

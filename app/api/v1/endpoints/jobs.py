@@ -5,16 +5,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_session, require_org_role
-from app.core.enums import DatasetStatus, JobStatus, JobType
+from app.core.enums import DatasetStatus, DatasetType, JobStatus, JobType
 from app.models.ai_model import AIModel
 from app.models.annotation_class import AnnotationClass
+from app.models.annotation_schema import AnnotationSchema
 from app.models.dataset import Dataset
 from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.models.map import Map
 from app.models.project import Project
 from app.models.user import User
-from app.schemas.job import ConvertToCogJobCreate, InferenceJobCreate, JobRead
+from app.schemas.job import (
+    ConvertToCogJobCreate,
+    ExtractRasterFeaturesJobCreate,
+    InferenceJobCreate,
+    JobRead,
+)
 from app.services.job_service import JobService
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -235,6 +241,106 @@ async def create_convert_to_cog_job(
     on success ``config.result.dataset_id`` is the new dataset.
     """
     return await _create_convert_to_cog_job(
+        payload,
+        org_id=org_id,
+        db=db,
+        current_user=current_user,
+    )
+
+
+async def _create_extract_raster_features_job(
+    payload: ExtractRasterFeaturesJobCreate,
+    *,
+    org_id: UUID,
+    db: AsyncSession,
+    current_user: User,
+) -> Job:
+    item = await db.scalar(
+        select(DatasetItem).where(
+            DatasetItem.id == payload.dataset_item_id,
+            DatasetItem.organization_id == org_id,
+            DatasetItem.is_active.is_(True),
+        )
+    )
+    if item is None or item.organization_id != org_id or not item.is_active:
+        raise HTTPException(status_code=404, detail="Dataset item not found")
+
+    dataset = await db.scalar(
+        select(Dataset).where(
+            Dataset.id == item.dataset_id,
+            Dataset.organization_id == org_id,
+            Dataset.deleted_at.is_(None),
+        )
+    )
+    if dataset is None or dataset.organization_id != org_id or dataset.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if dataset.dataset_type != DatasetType.IMAGERY:
+        raise HTTPException(status_code=422, detail="Source dataset must be imagery")
+    if dataset.status == DatasetStatus.INGESTING:
+        raise HTTPException(
+            status_code=409,
+            detail="Dataset is currently ingesting and cannot be used for extraction",
+        )
+    if dataset.status != DatasetStatus.READY:
+        raise HTTPException(status_code=422, detail="Dataset is not ready")
+
+    schema = await db.scalar(
+        select(AnnotationSchema).where(
+            AnnotationSchema.id == payload.schema_id,
+            AnnotationSchema.organization_id == org_id,
+            AnnotationSchema.deleted_at.is_(None),
+        )
+    )
+    if schema is None or schema.organization_id != org_id or schema.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Annotation schema not found")
+
+    ann_class = await db.scalar(
+        select(AnnotationClass).where(
+            AnnotationClass.id == payload.output_class_id,
+            AnnotationClass.schema_id == schema.id,
+        )
+    )
+    if ann_class is None or ann_class.schema_id != schema.id:
+        raise HTTPException(
+            status_code=422,
+            detail="output_class_id does not belong to the schema",
+        )
+
+    job = Job(
+        organization_id=org_id,
+        type=JobType.EXTRACT_RASTER_FEATURES,
+        status=JobStatus.QUEUED,
+        config={"trigger": "api", **payload.model_dump(mode="json")},
+        input_refs=[{"type": "dataset_item", "id": str(item.id)}],
+        created_by_user_id=current_user.id,
+        total_items=1,
+        processed_items=0,
+        failed_items=0,
+        progress=0.0,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    from app.workers.ingestion.tasks import extract_raster_features  # noqa: PLC0415
+
+    extract_raster_features.apply_async(args=[str(job.id)])
+    return job
+
+
+@router.post(
+    "/extract-raster-features",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_extract_raster_features_job(
+    payload: ExtractRasterFeaturesJobCreate,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue a band-threshold extract job for one imagery item."""
+    return await _create_extract_raster_features_job(
         payload,
         org_id=org_id,
         db=db,

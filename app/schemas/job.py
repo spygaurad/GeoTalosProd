@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import Field, model_validator
@@ -79,4 +79,27 @@ class InferenceJobCreate(ORMModel):
             raise ValueError("aoi_bbox must be [minx, miny, maxx, maxy] with min < max")
         if minx < -180 or maxx > 180 or miny < -90 or maxy > 90:
             raise ValueError("aoi_bbox must be within EPSG:4326 bounds")
+        return self
+
+
+class ExtractRasterFeaturesJobCreate(ORMModel):
+    """Payload for ``POST /jobs/extract-raster-features``."""
+
+    dataset_item_id: UUID
+    schema_id: UUID
+    output_class_id: UUID
+    band_index: int = Field(default=1, ge=1)
+    threshold_min: float
+    threshold_max: float | None = None
+    min_area_px: float = Field(default=0.0, ge=0)
+    simplify_tolerance: float | None = None
+    connectivity: Literal[4, 8] = 4
+    dissolve: bool = False
+    annotation_set_name: str | None = None
+    index: Literal["band"] = "band"
+
+    @model_validator(mode="after")
+    def validate_threshold_range(self):
+        if self.threshold_max is not None and self.threshold_max < self.threshold_min:
+            raise ValueError("threshold_max must be greater than or equal to threshold_min")
         return self

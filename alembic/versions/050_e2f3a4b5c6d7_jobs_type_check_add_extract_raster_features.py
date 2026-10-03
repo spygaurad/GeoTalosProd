@@ -1,25 +1,26 @@
-"""Update jobs type check to include convert_to_cog.
+"""Update jobs type check to include extract_raster_features.
 
-Revision ID: d1e2f3a4b5c6
-Revises: c9d0e1f2a3b4
-Create Date: 2026-09-20
+Revision ID: e2f3a4b5c6d7
+Revises: d1e2f3a4b5c6
+Create Date: 2026-09-30
 """
 
 from alembic import op
 
-revision = "d1e2f3a4b5c6"
-down_revision = "c9d0e1f2a3b4"
+revision = "e2f3a4b5c6d7"
+down_revision = "d1e2f3a4b5c6"
 branch_labels = None
 depends_on = None
 
 
 _TYPE_CHECK = (
     "type IN ('ingest', 'inference', 'import_annotations', "
-    "'vectorize_raster_mask', 'rasterize_annotation_set', 'convert_to_cog')"
+    "'vectorize_raster_mask', 'rasterize_annotation_set', "
+    "'convert_to_cog', 'extract_raster_features')"
 )
 _PRIOR_CHECK = (
     "type IN ('ingest', 'inference', 'import_annotations', "
-    "'vectorize_raster_mask', 'rasterize_annotation_set')"
+    "'vectorize_raster_mask', 'rasterize_annotation_set', 'convert_to_cog')"
 )
 
 

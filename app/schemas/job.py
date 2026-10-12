@@ -103,3 +103,12 @@ class ExtractRasterFeaturesJobCreate(ORMModel):
         if self.threshold_max is not None and self.threshold_max < self.threshold_min:
             raise ValueError("threshold_max must be greater than or equal to threshold_min")
         return self
+
+
+class RasterizeAnnotationSetJobCreate(ORMModel):
+    """Payload for ``POST /jobs/rasterize-annotation-set``."""
+
+    annotation_set_ids: list[UUID] = Field(min_length=1)
+    reference_dataset_id: UUID | None = None
+    resolution_m: float | None = Field(default=None, gt=0)
+    dataset_name: str | None = Field(default=None, max_length=255)

@@ -9,6 +9,7 @@ from app.core.enums import DatasetStatus, DatasetType, JobStatus, JobType
 from app.models.ai_model import AIModel
 from app.models.annotation_class import AnnotationClass
 from app.models.annotation_schema import AnnotationSchema
+from app.models.annotation_set import AnnotationSet
 from app.models.dataset import Dataset
 from app.models.dataset_item import DatasetItem
 from app.models.job import Job
@@ -20,6 +21,7 @@ from app.schemas.job import (
     ExtractRasterFeaturesJobCreate,
     InferenceJobCreate,
     JobRead,
+    RasterizeAnnotationSetJobCreate,
 )
 from app.services.job_service import JobService
 
@@ -341,6 +343,98 @@ async def create_extract_raster_features_job(
 ):
     """Queue a band-threshold extract job for one imagery item."""
     return await _create_extract_raster_features_job(
+        payload,
+        org_id=org_id,
+        db=db,
+        current_user=current_user,
+    )
+
+
+async def _create_rasterize_annotation_set_job(
+    payload: RasterizeAnnotationSetJobCreate,
+    *,
+    org_id: UUID,
+    db: AsyncSession,
+    current_user: User,
+) -> Job:
+    requested_ids = list(dict.fromkeys(payload.annotation_set_ids))
+    found = (
+        await db.scalars(
+            select(AnnotationSet).where(
+                AnnotationSet.id.in_(requested_ids),
+                AnnotationSet.organization_id == org_id,
+                AnnotationSet.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    if len(found) != len(requested_ids):
+        raise HTTPException(
+            status_code=404, detail="One or more annotation sets were not found"
+        )
+
+    if payload.reference_dataset_id is not None:
+        dataset = await db.scalar(
+            select(Dataset).where(
+                Dataset.id == payload.reference_dataset_id,
+                Dataset.organization_id == org_id,
+                Dataset.deleted_at.is_(None),
+            )
+        )
+        if dataset is None:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        if dataset.status == DatasetStatus.INGESTING:
+            raise HTTPException(
+                status_code=409,
+                detail="Dataset is currently ingesting and cannot be used as a reference",
+            )
+        if dataset.status != DatasetStatus.READY:
+            raise HTTPException(status_code=422, detail="Dataset is not ready")
+
+    job = Job(
+        organization_id=org_id,
+        type=JobType.RASTERIZE_ANNOTATION_SET,
+        status=JobStatus.QUEUED,
+        config={
+            "trigger": "api",
+            "annotation_set_ids": [str(set_id) for set_id in requested_ids],
+            "reference_dataset_id": (
+                str(payload.reference_dataset_id) if payload.reference_dataset_id else None
+            ),
+            "resolution_m": payload.resolution_m,
+            "dataset_name": (payload.dataset_name or "").strip() or None,
+        },
+        input_refs=[
+            {"type": "annotation_set", "id": str(set_id)} for set_id in requested_ids
+        ],
+        created_by_user_id=current_user.id,
+        total_items=1,
+        processed_items=0,
+        failed_items=0,
+        progress=0.0,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    from app.workers.ingestion.tasks import rasterize_annotation_set  # noqa: PLC0415
+
+    rasterize_annotation_set.apply_async(args=[str(job.id)])
+    return job
+
+
+@router.post(
+    "/rasterize-annotation-set",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_rasterize_annotation_set_job(
+    payload: RasterizeAnnotationSetJobCreate,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue a vector annotation set rasterize job into a segmentation-mask dataset."""
+    return await _create_rasterize_annotation_set_job(
         payload,
         org_id=org_id,
         db=db,

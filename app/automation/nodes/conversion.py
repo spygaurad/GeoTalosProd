@@ -6,6 +6,12 @@ conversions become first-class pipeline steps. Currently:
 - ``vectorize_raster_mask``: raster segmentation mask (COG) -> vector annotation
   set, so a raster ground-truth set can feed straight into Ground Truth
   Comparison / IoU / area nodes alongside vector model predictions.
+- ``rasterize_annotation_set``: vector annotation set(s) -> segmentation-mask
+  COG dataset (deferred to a Celery job).
+- ``convert_to_cog``: dataset GeoTIFFs -> sibling Cloud-Optimized GeoTIFF
+  dataset (deferred to a Celery job; the source dataset is not modified).
+- ``extract_raster_features``: threshold one imagery band of a dataset item
+  into a new analysis annotation set (deferred to a Celery job).
 
 (Add further conversion nodes here as the converter library grows.)
 """
@@ -269,5 +275,309 @@ def execute_rasterize_annotation_set(session, config, input_data, **kwargs):
 
     from app.workers.ingestion.tasks import rasterize_annotation_set
     rasterize_annotation_set.delay(str(job.id))
+
+    return DeferToJob(job_id=str(job.id))
+
+
+def _run_context(session, run_id) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+    """``(project_id, creator_user_id)`` for the automation run dispatching a job.
+
+    The creator is the user who triggered the run, falling back to the pipeline
+    owner (scheduled / event-triggered runs have no ``triggered_by``).
+    """
+    from app.models.automation import AutomationPipeline, AutomationRun
+
+    run = session.get(AutomationRun, uuid.UUID(str(run_id))) if run_id else None
+    if run is None:
+        return None, None
+    creator = run.triggered_by
+    if creator is None:
+        pipeline = session.get(AutomationPipeline, run.pipeline_id)
+        creator = pipeline.created_by if pipeline is not None else None
+    return run.project_id, creator
+
+
+@node(
+    type="convert_to_cog",
+    category="data_operations",
+    label="Convert to COG",
+    description=(
+        "Convert a dataset's GeoTIFFs into a new Cloud-Optimized GeoTIFF dataset. "
+        "Items that are already COGs are copied as-is. The source dataset is not "
+        "modified; the output dataset is passed downstream once conversion finishes."
+    ),
+    inputs=[HandleDef(handle="dataset", type="dataset", label="Source Dataset")],
+    outputs=[HandleDef(handle="dataset", type="dataset", label="COG Dataset")],
+    config_schema={
+        "type": "object",
+        "properties": {
+            "dataset_name": {
+                "type": "string",
+                "title": "Output Dataset Name",
+                "description": "Defaults to '<source> · COG'.",
+            },
+        },
+    },
+    icon="file-cog",
+    color="#0EA5E9",
+)
+def execute_convert_to_cog(session, config, input_data, **kwargs):
+    """Dispatch a Celery job that converts the input dataset into a COG dataset.
+
+    Validation mirrors ``POST /jobs/convert-to-cog``; the conversion itself runs
+    on the ingestion worker, and the step resumes with ``{"dataset": {...}}``.
+    """
+    from sqlalchemy import select
+
+    from app.automation.registry import DeferToJob
+    from app.core.enums import DatasetStatus, JobType
+    from app.models.dataset import Dataset
+    from app.models.dataset_item import DatasetItem
+    from app.models.job import Job
+
+    source = input_data.get("dataset") or {}
+    if isinstance(source, list):
+        source = source[0] if source else {}
+    source_id = source.get("id") if isinstance(source, dict) else None
+    if not source_id:
+        raise ValueError("convert_to_cog requires an input dataset with an id")
+
+    org_id = uuid.UUID(str(kwargs.get("organization_id")))
+    dataset = session.get(Dataset, uuid.UUID(str(source_id)))
+    if dataset is None or dataset.deleted_at is not None or dataset.organization_id != org_id:
+        raise ValueError(f"Dataset {source_id} not found")
+    if dataset.status == DatasetStatus.INGESTING:
+        raise ValueError("Dataset is currently ingesting and cannot be converted")
+
+    items = session.execute(
+        select(DatasetItem.id).where(
+            DatasetItem.dataset_id == dataset.id,
+            DatasetItem.organization_id == org_id,
+            DatasetItem.is_active.is_(True),
+        )
+    ).scalars().all()
+    if not items:
+        raise ValueError("Dataset has no active raster items to convert")
+
+    run_id = kwargs.get("run_id")
+    project_id, creator_id = _run_context(session, run_id)
+
+    job = Job(
+        organization_id=org_id,
+        type=JobType.CONVERT_TO_COG.value,
+        status="queued",
+        config={
+            "trigger": "automation",
+            "source_dataset_id": str(dataset.id),
+            "dataset_item_ids": [str(item_id) for item_id in items],
+            "dataset_name": (config.get("dataset_name") or "").strip() or None,
+            "project_id": str(project_id) if project_id else None,
+            "automation_run_id": run_id,
+            "automation_step_id": kwargs.get("step_id"),
+        },
+        input_refs=[{"type": "dataset", "id": str(dataset.id)}],
+        created_by_user_id=creator_id,
+        total_items=len(items),
+        processed_items=0,
+        failed_items=0,
+        progress=0.0,
+    )
+    session.add(job)
+    session.flush()
+
+    from app.workers.ingestion.tasks import convert_dataset_to_cog
+    convert_dataset_to_cog.delay(str(job.id))
+
+    return DeferToJob(job_id=str(job.id))
+
+
+_EXTRACT_CONFIG_KEYS = (
+    "schema_id",
+    "output_class_id",
+    "band_index",
+    "threshold_min",
+    "threshold_max",
+    "min_area_px",
+    "simplify_tolerance",
+    "connectivity",
+    "dissolve",
+    "annotation_set_name",
+)
+
+
+def _collect_item_ids(payloads) -> list[str]:
+    """Flatten upstream ``dataset_items`` payloads to a de-duplicated id list."""
+    if isinstance(payloads, dict):
+        payloads = [payloads]
+    out: list[str] = []
+    for payload in payloads or []:
+        ids = _collect_item_ids(payload) if isinstance(payload, list) else (
+            [str(payload["id"])] if isinstance(payload, dict) and payload.get("id") else []
+        )
+        out.extend(i for i in ids if i not in out)
+    return out
+
+
+@node(
+    type="extract_raster_features",
+    category="data_operations",
+    label="Extract Raster Features",
+    description=(
+        "Threshold one band of an imagery item and polygonize the matching pixels "
+        "into a new analysis annotation set (e.g. NDVI > 0.4 -> vegetation "
+        "polygons). The source raster is not modified."
+    ),
+    inputs=[HandleDef(handle="items", type="dataset_items", label="Imagery Item")],
+    outputs=[HandleDef(handle="annotation_set", type="annotation_set", label="Annotation Set")],
+    config_schema={
+        "type": "object",
+        "properties": {
+            "schema_id": {
+                "type": "string",
+                "format": "uuid",
+                "title": "Annotation Schema",
+                "x-picker": "annotation_schema",
+            },
+            "output_class_id": {
+                "type": "string",
+                "format": "uuid",
+                "title": "Output Class",
+                "x-picker": "annotation_class",
+                "description": "Every extracted polygon is labelled with this class.",
+            },
+            "band_index": {
+                "type": "integer",
+                "title": "Band",
+                "default": 1,
+                "minimum": 1,
+            },
+            "threshold_min": {
+                "type": "number",
+                "title": "Threshold Min",
+                "description": "Pixels with value >= this are extracted.",
+            },
+            "threshold_max": {
+                "type": "number",
+                "title": "Threshold Max",
+                "description": "Optional upper bound (inclusive); leave empty for no limit.",
+            },
+            "min_area_px": {
+                "type": "number",
+                "title": "Min Region Area (pixels)",
+                "default": 0,
+                "minimum": 0,
+            },
+            "simplify_tolerance": {
+                "type": "number",
+                "title": "Simplify Tolerance (source CRS units)",
+                "description": "Douglas-Peucker tolerance; leave empty for full detail.",
+                "minimum": 0,
+            },
+            "connectivity": {
+                "type": "integer",
+                "title": "Pixel Connectivity",
+                "enum": [4, 8],
+                "default": 4,
+            },
+            "dissolve": {
+                "type": "boolean",
+                "title": "Dissolve Regions",
+                "description": "Merge all extracted regions into one geometry.",
+                "default": False,
+            },
+            "annotation_set_name": {
+                "type": "string",
+                "title": "Output Set Name",
+            },
+        },
+        "required": ["schema_id", "output_class_id", "threshold_min"],
+    },
+    icon="scan-search",
+    color="#0EA5E9",
+)
+def execute_extract_raster_features(session, config, input_data, **kwargs):
+    """Dispatch a Celery job that thresholds one imagery item into an annotation set.
+
+    Validation mirrors ``POST /jobs/extract-raster-features``; the extraction runs
+    on the ingestion worker, and the step resumes with ``{"annotation_set": {...}}``.
+    """
+    from pydantic import ValidationError
+
+    from app.automation.registry import DeferToJob
+    from app.core.enums import DatasetStatus, DatasetType, JobType
+    from app.models.annotation_class import AnnotationClass
+    from app.models.annotation_schema import AnnotationSchema
+    from app.models.dataset import Dataset
+    from app.models.dataset_item import DatasetItem
+    from app.models.job import Job
+    from app.schemas.job import ExtractRasterFeaturesJobCreate
+
+    item_ids = _collect_item_ids(input_data.get("items"))
+    if not item_ids:
+        raise ValueError("extract_raster_features requires an input dataset item")
+    if len(item_ids) > 1:
+        raise ValueError(
+            "extract_raster_features works on one item at a time but received "
+            f"{len(item_ids)}; select a single item in the upstream data source"
+        )
+
+    # Form fields left blank arrive as "" — drop them so schema defaults apply.
+    raw = {key: config.get(key) for key in _EXTRACT_CONFIG_KEYS if config.get(key) not in (None, "")}
+    if isinstance(raw.get("annotation_set_name"), str):
+        raw["annotation_set_name"] = raw["annotation_set_name"].strip() or None
+    try:
+        payload = ExtractRasterFeaturesJobCreate.model_validate(
+            {**raw, "dataset_item_id": item_ids[0]}
+        )
+    except ValidationError as exc:
+        raise ValueError(f"Invalid extract_raster_features config: {exc}") from exc
+
+    org_id = uuid.UUID(str(kwargs.get("organization_id")))
+    item = session.get(DatasetItem, payload.dataset_item_id)
+    if item is None or not item.is_active or item.organization_id != org_id:
+        raise ValueError(f"Dataset item {payload.dataset_item_id} not found")
+    dataset = session.get(Dataset, item.dataset_id)
+    if dataset is None or dataset.deleted_at is not None or dataset.organization_id != org_id:
+        raise ValueError("Dataset not found")
+    if dataset.dataset_type != DatasetType.IMAGERY:
+        raise ValueError("Source dataset must be imagery")
+    if dataset.status != DatasetStatus.READY:
+        raise ValueError("Dataset is not ready")
+
+    schema = session.get(AnnotationSchema, payload.schema_id)
+    if schema is None or schema.deleted_at is not None or schema.organization_id != org_id:
+        raise ValueError("Annotation schema not found")
+    ann_class = session.get(AnnotationClass, payload.output_class_id)
+    if ann_class is None or ann_class.schema_id != schema.id:
+        raise ValueError("output_class_id does not belong to the schema")
+
+    run_id = kwargs.get("run_id")
+    _project_id, creator_id = _run_context(session, run_id)
+    if creator_id is None:
+        # The worker refuses to persist an annotation set without an owner.
+        raise ValueError("Cannot determine the user running this pipeline")
+
+    job = Job(
+        organization_id=org_id,
+        type=JobType.EXTRACT_RASTER_FEATURES.value,
+        status="queued",
+        config={
+            "trigger": "automation",
+            **payload.model_dump(mode="json"),
+            "automation_run_id": run_id,
+            "automation_step_id": kwargs.get("step_id"),
+        },
+        input_refs=[{"type": "dataset_item", "id": str(item.id)}],
+        created_by_user_id=creator_id,
+        total_items=1,
+        processed_items=0,
+        failed_items=0,
+        progress=0.0,
+    )
+    session.add(job)
+    session.flush()
+
+    from app.workers.ingestion.tasks import extract_raster_features
+    extract_raster_features.delay(str(job.id))
 
     return DeferToJob(job_id=str(job.id))

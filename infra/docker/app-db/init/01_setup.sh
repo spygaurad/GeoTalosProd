@@ -63,6 +63,9 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
     \$\$;
 
     GRANT CONNECT ON DATABASE geoplat TO app_user;
+    -- Migration 074 creates the `reference` schema (public reference layers) as app_user.
+    -- Existing databases need this once by hand: GRANT CREATE ON DATABASE geoplat TO app_user;
+    GRANT CREATE ON DATABASE geoplat TO app_user;
     -- Alembic needs CREATE on schema public to create alembic_version + first tables.
     GRANT USAGE, CREATE ON SCHEMA public TO app_user;
     -- Ensure app_user can access tables/sequences created by migrations.

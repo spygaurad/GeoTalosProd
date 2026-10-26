@@ -27,6 +27,7 @@ from app.api.v1.endpoints import (
     organization_members,
     organizations,
     projects,
+    reference_layers,
     styles,
     stac,
     storage_download,
@@ -67,6 +68,7 @@ api_router.include_router(annotations.map_router)
 api_router.include_router(basemaps.router)
 api_router.include_router(tile_sources.router)
 api_router.include_router(feature_layers.router)
+api_router.include_router(reference_layers.router)
 api_router.include_router(automation.router)
 api_router.include_router(storage_download.router)
 api_router.include_router(events.router)

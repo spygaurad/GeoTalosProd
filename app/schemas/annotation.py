@@ -11,7 +11,7 @@ from app.schemas.common import ORMModel, PaginatedResponse
 class AnnotationCreate(ORMModel):
     class_id: UUID
     geometry: dict
-    confidence: float | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
     properties: dict | None = None
     dataset_item_id: UUID | None = Field(
         default=None,
@@ -32,7 +32,7 @@ class AnnotationCreateOnMap(ORMModel):
 
     class_id: UUID
     geometry: dict
-    confidence: float | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
     properties: dict | None = None
     schema_id: UUID | None = None
     dataset_id: UUID | None = None
@@ -48,7 +48,7 @@ class AnnotationCreateOnMap(ORMModel):
 class AnnotationUpdate(ORMModel):
     class_id: UUID | None = None
     geometry: dict | None = None
-    confidence: float | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
     properties: dict | None = None
 
 

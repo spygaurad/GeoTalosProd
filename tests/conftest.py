@@ -57,6 +57,8 @@ def client() -> TestClient:
          patch.object(ClerkAuthMiddleware, "_is_dev_bypass_allowed", return_value=True):
         mock_settings.ENVIRONMENT = "development"
         with TestClient(app) as test_client:
+            # Tests never use the live tile cache; cache tests install a fake.
+            app.state.tile_cache = None
             yield test_client
 
     app.dependency_overrides.clear()

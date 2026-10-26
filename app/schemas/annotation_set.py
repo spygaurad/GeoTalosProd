@@ -128,6 +128,8 @@ class AnnotationSetRead(ORMModel):
     description: str | None
     raster_config: dict | None = None
     review_status: str = "raw"
+    # Changes whenever the set's annotations change; clients append it to tile URLs.
+    tile_version: int = 1
     # [minx, miny, maxx, maxy] over all live annotations; null when empty.
     extent_4326: list[float] | None = None
     # Filled by the org-level list only (one grouped query), so rows can show them without N lookups.

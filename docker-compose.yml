@@ -134,6 +134,19 @@ services:
       com.awakeforest.service: app-db
       com.awakeforest.role: database
 
+  app-db-migrate:
+    <<: *app-build
+    container_name: awakeforest-app-db-migrate
+    environment:
+      <<: *app-env
+    command: alembic upgrade head
+    depends_on:
+      app-db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - awakeforest-backend
+
   stac-db:
     image: ghcr.io/stac-utils/pgstac:v0.9.10
     container_name: awakeforest-stac-db
@@ -314,6 +327,32 @@ services:
       com.awakeforest.service: redis
       com.awakeforest.role: broker
 
+  # Annotation vector-tile cache. Separate from `redis` so evicting tile bytes
+  # can never evict Celery queue/result or event data. Keys are versioned
+  # (tile:{org}:{set}:{tile_version}:{z}:{x}:{y}); old versions age out via LRU.
+  # No persistence and no host port: only the API reaches it.
+  redis-tiles:
+    image: redis:7.2-alpine
+    container_name: awakeforest-redis-tiles
+    restart: unless-stopped
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --maxmemory ${TILE_CACHE_MAXMEM:-256mb}
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD:-redis_pass}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_pass}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - awakeforest-backend
+    labels:
+      com.awakeforest.service: redis-tiles
+      com.awakeforest.role: cache
+
   # ============================================================================
   # OBJECT STORAGE  (MinIO — S3-compatible)
   # ============================================================================
@@ -361,6 +400,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
       MINIO_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-*}
+      MARTIN_TILES_PASSWORD: ${MARTIN_TILES_PASSWORD:-martin_tiles_pass}
     entrypoint: >
       /bin/sh -c "
         set -e
@@ -370,6 +410,16 @@ services:
         mc mb --ignore-existing local/awakeforest-exports
         mc mb --ignore-existing local/awakeforest-jobs
         mc mb --ignore-existing local/org-00000000-0000-0000-0000-000000000001
+        # Public reference layers (PMTiles), read by Martin
+        mc mb --ignore-existing local/reference-tiles
+        # Martin gets its own read-only user for that bucket (never the root credentials)
+        echo '{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\"],\"Resource\":[\"arn:aws:s3:::reference-tiles/*\"]},{\"Effect\":\"Allow\",\"Action\":[\"s3:ListBucket\",\"s3:GetBucketLocation\"],\"Resource\":[\"arn:aws:s3:::reference-tiles\"]}]}' > /tmp/reference-tiles-read.json
+
+        mc admin policy create local reference-tiles-read /tmp/reference-tiles-read.json || true
+
+        mc admin user add local martin-tiles $$MARTIN_TILES_PASSWORD || true
+
+        mc admin policy attach local reference-tiles-read --user martin-tiles || true
 
         # ---- APPLY ALL GLOBAL CORS SETTINGS IN ONE SHOT ----
         echo 'Configuring global CORS...'
@@ -406,6 +456,7 @@ services:
     container_name: awakeforest-api
     environment:
       <<: *app-env
+      TILE_CACHE_REDIS_URL: redis://:${REDIS_PASSWORD:-redis_pass}@redis-tiles:6379/0
     extra_hosts:              
       - "host.docker.internal:host-gateway"
     # --reload watches for source changes; remove in staging/production
@@ -417,10 +468,15 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       stac-db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # Started, not healthy: the tile cache is optional and the API falls back to Martin.
+      redis-tiles:
+        condition: service_started
       minio:
         condition: service_healthy
       titiler:
@@ -457,6 +513,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       stac-db:
         condition: service_healthy
       stac-db-migrate:
@@ -491,6 +549,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       minio:
@@ -521,6 +581,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       stac-db:
         condition: service_healthy
       redis:
@@ -559,6 +621,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       minio:
@@ -588,6 +652,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     networks:
@@ -614,6 +680,8 @@ services:
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     networks:
@@ -663,15 +731,21 @@ services:
       # Never use celery_worker here — it has write access and BYPASSRLS.
       DATABASE_URL: postgresql://martin_reader:${MARTIN_READER_PASSWORD:-martin_pass}@app-db:5432/geoplat
       PORT: 3000
+      # Large public reference layers: PMTiles files in the MinIO reference-tiles bucket,
+      # read with a read-only MinIO user (created by minio-setup). Used by config.yaml.
+      MARTIN_TILES_USER: martin-tiles
+      MARTIN_TILES_PASSWORD: ${MARTIN_TILES_PASSWORD:-martin_tiles_pass}
     # Explicit config — prevents auto-discovery from exposing unintended tables.
     command: --config /config.yaml
     volumes:
       - ./infra/docker/martin/config.yaml:/config.yaml:ro
-    ports:
-      - "${MARTIN_PORT:-3000}:3000"
+    # ports:
+    #   - "${MARTIN_PORT:-3000}:3000"
     depends_on:
       app-db:
         condition: service_healthy
+      app-db-migrate:
+        condition: service_completed_successfully
     healthcheck:
       # Martin binds to the Docker bridge interface, not loopback — check via
       # the host-mapped port instead of localhost inside the container.
@@ -679,6 +753,7 @@ services:
       interval: 60s
     networks:
       - awakeforest-backend
+      - awakeforest-storage  # PMTiles in MinIO
     labels:
       com.awakeforest.service: martin
       com.awakeforest.role: tile-server

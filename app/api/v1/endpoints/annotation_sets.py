@@ -4,7 +4,11 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+
+from fastapi.responses import Response
+from app.services.tile_proxy import cached_forward_tile
+
 from pydantic import BaseModel, Field
 from sqlalchemy import delete as sa_delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -255,6 +259,47 @@ async def get_annotation_set(
     _current_user: User = Depends(get_current_user),
 ):
     return await AnnotationSetService(db).get_set(set_id, organization_id=org_id)
+
+
+@set_router.get("/tiles/{z}/{x}/{y}.pbf", response_class=Response)
+async def get_annotation_set_tile(
+    set_id: UUID,
+    request: Request,
+    z: int = Path(..., ge=0, le=22),
+    x: int = Path(..., ge=0),
+    y: int = Path(..., ge=0),
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    _current_user: User = Depends(get_current_user),
+) -> Response:
+    annotation_set = await AnnotationSetService(db).get_set(
+        set_id, organization_id=org_id
+    )
+
+    if x >= 2**z or y >= 2**z:
+        raise HTTPException(
+            status_code=422,
+            detail="Tile coordinates are outside the zoom level bounds",
+        )
+
+    # The version goes to Martin too: Martin caches by full URL, so without it
+    # an edited set would keep serving Martin's stale bytes.
+    version = annotation_set.tile_version
+    url = (
+        f"/annotation_set_mvt/{z}/{x}/{y}"
+        f"?set_id={annotation_set.id}&v={version}"
+    )
+    cache_key = f"tile:{org_id}:{annotation_set.id}:{version}:{z}:{x}:{y}"
+
+    response = await cached_forward_tile(
+        request.app.state.tile_cache,
+        cache_key,
+        request.app.state.martin_client,
+        url,
+        content_type="application/x-protobuf",
+    )
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 @router.post("", response_model=AnnotationSetRead, status_code=status.HTTP_201_CREATED)

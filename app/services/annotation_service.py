@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import bad_request, conflict, not_found
-from app.core.geometry import parse_geometry, serialize_geometry
+from app.core.geometry import parse_geometry, serialize_geometry, validate_wgs84_geometry
 from app.models.annotation import Annotation
 from app.models.annotation_class import AnnotationClass
 from app.models.annotation_schema import AnnotationSchema
@@ -95,9 +95,13 @@ class AnnotationService:
     def _validate_geometry(
         self, geometry: dict, allowed_types: list[str] | None
     ) -> None:
+        try:
+            geom = validate_wgs84_geometry(geometry)
+        except ValueError as exc:
+            raise bad_request(str(exc)) from exc
         if not allowed_types:
             return
-        geom_type = _normalize_geom_type(shape_geom(geometry).geom_type)
+        geom_type = _normalize_geom_type(geom.geom_type)
         if geom_type not in allowed_types:
             raise bad_request(
                 f"Geometry type '{geom_type}' is not allowed for this schema"

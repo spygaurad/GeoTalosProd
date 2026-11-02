@@ -38,6 +38,24 @@ class ConvertToCogJobCreate(ORMModel):
     project_id: UUID | None = None
 
 
+class ReprojectRasterJobCreate(ORMModel):
+    """Payload for ``POST /jobs/reproject-raster``."""
+
+    dataset_id: UUID
+    dst_crs: str = Field(min_length=1, max_length=64, description="Target CRS, e.g. 'EPSG:3857'.")
+    resampling: Literal["nearest", "bilinear", "cubic"] | None = Field(
+        default=None,
+        description="Defaults to 'nearest' for segmentation masks and 'bilinear' otherwise.",
+    )
+    dataset_item_ids: list[UUID] | None = Field(
+        default=None,
+        min_length=1,
+        description="If omitted, every active item on the dataset is reprojected.",
+    )
+    dataset_name: str | None = Field(default=None, max_length=255)
+    project_id: UUID | None = None
+
+
 class InferenceJobCreate(ORMModel):
     """Payload for ``POST /jobs/inference`` — model-agnostic batch inference."""
 

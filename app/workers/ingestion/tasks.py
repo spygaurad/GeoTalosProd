@@ -24,7 +24,7 @@ from app.models.dataset import Dataset
 from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.services import storage_service
-from app.services.conversion import convert_geotiff_to_cog
+from app.services.conversion import convert_geotiff_to_cog, reproject_raster_to_cog
 from app.workers.celery_app import celery_app
 from app.workers.db import WorkerSession
 from app.workers.queues import INGESTION
@@ -244,6 +244,52 @@ def _materialize_standalone_cog(
     )
     logger.info("cog_copied src=%s dest=%s", s3_uri, dest_uri)
     return dest_uri, True
+
+
+def _reprojected_cog_object_key(
+    output_dataset_id: uuid.UUID,
+    source_item_id: uuid.UUID,
+    filename: str,
+    dst_crs: str,
+) -> str:
+    crs_tag = _safe_raster_stem(dst_crs.replace(":", "_"))
+    return storage_service.object_key(
+        output_dataset_id,
+        f"processed/{source_item_id}_{_safe_raster_stem(filename)}_{crs_tag}.tif",
+    )
+
+
+def _materialize_reprojected_cog(
+    *,
+    organization_id: uuid.UUID,
+    output_dataset_id: uuid.UUID,
+    source_item_id: uuid.UUID,
+    s3_uri: str,
+    filename: str,
+    dst_crs: str,
+    resampling: str,
+    gdal_env: dict,
+) -> str:
+    """Reproject a source raster into a COG under the output dataset.
+
+    Returns the destination ``s3://`` URI. Temp files are always removed.
+    """
+    dest_key = _reprojected_cog_object_key(output_dataset_id, source_item_id, filename, dst_crs)
+    bucket = storage_service.bucket_name(organization_id)
+    dest_uri = f"s3://{bucket}/{dest_key}"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_out = os.path.join(tmpdir, f"{_safe_raster_stem(filename)}_reprojected.tif")
+        try:
+            reproject_raster_to_cog(
+                s3_uri, tmp_out, dst_crs, resampling=resampling, gdal_env=gdal_env
+            )
+        except ValueError as exc:
+            raise PermanentTaskError(str(exc)) from exc
+        storage_service.upload_from_path(
+            organization_id, dest_key, tmp_out, content_type="image/tiff"
+        )
+    logger.info("reprojected_cog_uploaded src=%s dest=%s crs=%s", s3_uri, dest_uri, dst_crs)
+    return dest_uri
 
 
 def _deterministic_item_id(s3_uri: str) -> str:
@@ -1453,7 +1499,9 @@ def _output_items_by_source_id(session, output_dataset_id: uuid.UUID) -> dict[st
     return mapping
 
 
-def _get_or_create_convert_output_dataset(session, job, cfg: dict, source: Dataset) -> Dataset:
+def _get_or_create_convert_output_dataset(
+    session, job, cfg: dict, source: Dataset, *, name_suffix: str = "COG"
+) -> Dataset:
     existing_id = cfg.get("output_dataset_id")
     if existing_id:
         ds = session.get(Dataset, uuid.UUID(str(existing_id)))
@@ -1470,7 +1518,7 @@ def _get_or_create_convert_output_dataset(session, job, cfg: dict, source: Datas
     output = Dataset(
         id=uuid.uuid4(),
         organization_id=job.organization_id,
-        name=(cfg.get("dataset_name") or "").strip() or f"{source.name} · COG",
+        name=(cfg.get("dataset_name") or "").strip() or f"{source.name} · {name_suffix}",
         description=source.description,
         dataset_type=source.dataset_type,
         status=DatasetStatus.INGESTING,
@@ -1777,6 +1825,280 @@ def convert_dataset_to_cog(self, job_id: str) -> None:
         except Exception as exc:
             session.rollback()
             logger.exception("convert_dataset_to_cog transient error job=%s", job_id)
+            raise self.retry(exc=exc)
+
+    if automation_run_id and automation_step_id and output_data is not None:
+        from app.workers.automation.tasks import resume_after_job  # noqa: PLC0415
+
+        resume_after_job.delay(job_id, output_data)
+
+
+@celery_app.task(bind=True, queue=INGESTION, max_retries=2, default_retry_delay=60)
+def reproject_raster(self, job_id: str) -> None:
+    """Reproject a source dataset's rasters into a sibling COG dataset in another CRS.
+
+    Reads ``job.config``:
+
+    ``source_dataset_id``   required
+    ``dst_crs``             required target CRS, e.g. ``'EPSG:3857'``
+    ``resampling``          ``nearest`` / ``bilinear`` / ``cubic`` (default ``nearest``)
+    ``dataset_item_ids``    optional subset; otherwise all active items
+    ``dataset_name``        optional output name (default ``'{source} · {dst_crs}'``)
+    ``output_dataset_id``   persisted on first run and reused on Celery retry
+    ``project_id``          optional ProjectDataset link on success
+    ``automation_run_id``/``automation_step_id``  resume a waiting pipeline step
+
+    The source Dataset is never modified. Output stays ``ingesting`` until every
+    selected item is reprojected, registered in MinIO + pgSTAC + DatasetItem,
+    and aggregated metadata is written.
+    """
+    from sqlalchemy import select as sync_select  # noqa: PLC0415
+
+    from app.models.job_output import JobOutput
+    from app.models.project_dataset import ProjectDataset
+
+    job_uuid = uuid.UUID(job_id)
+    output_data: dict | None = None
+    automation_run_id = automation_step_id = None
+
+    with WorkerSession() as session:
+        job = session.get(Job, job_uuid)
+        if job is None:
+            logger.error("reproject_raster: job %s not found", job_id)
+            return
+        cfg = dict(job.config or {})
+        automation_run_id = cfg.get("automation_run_id")
+        automation_step_id = cfg.get("automation_step_id")
+        try:
+            job.status = JobStatus.RUNNING
+            job.started_at = job.started_at or _now()
+            session.commit()
+
+            source_id = cfg.get("source_dataset_id")
+            if not source_id:
+                raise PermanentTaskError("job.config.source_dataset_id is required")
+            dst_crs = cfg.get("dst_crs")
+            if not dst_crs:
+                raise PermanentTaskError("job.config.dst_crs is required")
+            resampling = cfg.get("resampling") or "nearest"
+            source = session.get(Dataset, uuid.UUID(str(source_id)))
+            if source is None or source.deleted_at is not None:
+                raise PermanentTaskError("source dataset not found")
+            if source.organization_id != job.organization_id:
+                raise PermanentTaskError(
+                    "Job and dataset organization mismatch — refusing reprojection"
+                )
+
+            configured_ids = [
+                uuid.UUID(str(i)) for i in (cfg.get("dataset_item_ids") or []) if i
+            ]
+            items = _active_source_items(
+                session,
+                dataset_id=source.id,
+                organization_id=job.organization_id,
+                item_ids=configured_ids or None,
+            )
+            if configured_ids and len(items) != len(set(configured_ids)):
+                raise PermanentTaskError("one or more dataset items were not found")
+            if not items:
+                raise PermanentTaskError("source dataset has no active raster items")
+
+            job.total_items = len(items)
+            job.processed_items = 0
+            job.failed_items = 0
+            job.progress = 0.0
+            session.commit()
+
+            output = _get_or_create_convert_output_dataset(
+                session, job, cfg, source, name_suffix=dst_crs
+            )
+            cfg = dict(job.config or cfg)
+            already_done = _output_items_by_source_id(session, output.id)
+
+            gdal_env = _gdal_env_for_worker()
+            storage_service.ensure_org_bucket(job.organization_id)
+            collection = _ensure_collection(session, output, job.organization_id)
+
+            failed_files: list[str] = []
+            prepared: list[tuple[DatasetItem, str, str, dict]] = []
+
+            for idx, source_item in enumerate(items):
+                existing = already_done.get(str(source_item.id))
+                if existing is not None:
+                    prepared.append(
+                        (
+                            source_item,
+                            existing.s3_uri,
+                            existing.stac_item_id,
+                            {
+                                "geometry": existing.geometry,
+                                "properties": existing.properties_cache or {},
+                            },
+                        )
+                    )
+                    job.processed_items = idx + 1
+                    job.progress = job.processed_items / job.total_items
+                    session.commit()
+                    continue
+                try:
+                    dest_uri = _materialize_reprojected_cog(
+                        organization_id=job.organization_id,
+                        output_dataset_id=output.id,
+                        source_item_id=source_item.id,
+                        s3_uri=source_item.s3_uri,
+                        filename=source_item.filename,
+                        dst_crs=dst_crs,
+                        resampling=resampling,
+                        gdal_env=gdal_env,
+                    )
+                    success, issues, item_id, stac_item = _prepare_single_cog(
+                        dest_uri,
+                        source_item.filename,
+                        collection,
+                        gdal_env,
+                        output.dataset_type,
+                    )
+                    if not success or stac_item is None or item_id is None:
+                        failed_files.append(
+                            f"{source_item.filename}: {'; '.join(issues) or 'COG validation failed'}"
+                        )
+                    else:
+                        stac_item = _stac_item_with_source_rendering(source_item, stac_item)
+                        stac_item["properties"]["reprojected_to"] = dst_crs
+                        prepared.append((source_item, dest_uri, item_id, stac_item))
+                except PermanentTaskError as exc:
+                    failed_files.append(f"{source_item.filename}: {exc}")
+                job.processed_items = idx + 1
+                job.failed_items = len(failed_files)
+                job.progress = job.processed_items / job.total_items
+                session.commit()
+
+            if failed_files:
+                job.logs = "\n".join(failed_files)[:4000]
+                raise PermanentTaskError(
+                    f"{len(failed_files)} of {len(items)} item(s) failed reprojection"
+                )
+
+            new_stac = []
+            for source_item, _uri, _iid, stac_item in prepared:
+                if str(source_item.id) not in already_done:
+                    new_stac.append(stac_item)
+            if new_stac:
+                batch_upsert_stac_items(new_stac, settings.STAC_SYNC_DATABASE_URL)
+
+            result_items = []
+            for source_item, dest_uri, item_id, stac_item in prepared:
+                if str(source_item.id) not in already_done:
+                    _upsert_dataset_item(
+                        session,
+                        dataset_id=output.id,
+                        organization_id=job.organization_id,
+                        stac_item_id=item_id,
+                        stac_collection_id=collection,
+                        s3_uri=dest_uri,
+                        filename=source_item.filename,
+                        stac_item=stac_item,
+                    )
+                result_items.append(
+                    {
+                        "source_item_id": str(source_item.id),
+                        "filename": source_item.filename,
+                        "s3_uri": dest_uri,
+                    }
+                )
+
+            agg = _compute_aggregated_metadata(output.stac_collection_id)
+            if agg is None:
+                raise PermanentTaskError(
+                    f"Reprojection completed but no items found in pgSTAC for "
+                    f"collection {output.stac_collection_id!r}."
+                )
+            output.metadata_ = _merge_source_rendering_metadata(
+                source, dict(agg.get("metadata") or {})
+            )
+            if agg.get("wkt"):
+                output.geometry = WKTElement(agg["wkt"], srid=4326)
+            if agg.get("start_date") and agg.get("end_date"):
+                output.temporal_extent = DateTimeTZRange(
+                    agg["start_date"], agg["end_date"], bounds="[]"
+                )
+            output.status = DatasetStatus.READY
+
+            project_id = cfg.get("project_id")
+            if project_id:
+                proj_uuid = uuid.UUID(str(project_id))
+                existing_link = session.get(ProjectDataset, (proj_uuid, output.id))
+                if existing_link is None:
+                    session.add(
+                        ProjectDataset(
+                            project_id=proj_uuid,
+                            dataset_id=output.id,
+                            linked_by=job.created_by_user_id,
+                        )
+                    )
+
+            existing_output = session.execute(
+                sync_select(JobOutput).where(
+                    JobOutput.job_id == job.id,
+                    JobOutput.output_id == output.id,
+                )
+            ).scalar_one_or_none()
+            if existing_output is None:
+                session.add(
+                    JobOutput(
+                        job_id=job.id,
+                        output_type="dataset",
+                        output_id=output.id,
+                    )
+                )
+
+            cfg["result"] = {
+                "source_dataset_id": str(source.id),
+                "dataset_id": str(output.id),
+                "dst_crs": dst_crs,
+                "resampling": resampling,
+                "reprojected_count": len(items),
+                "failed_count": 0,
+                "items": result_items,
+            }
+            job.config = dict(cfg)
+            job.processed_items = len(items)
+            job.failed_items = 0
+            job.progress = 1.0
+            job.status = JobStatus.COMPLETED
+            job.finished_at = _now()
+            session.commit()
+            _publish_job_event(job)
+            logger.info(
+                "reproject_raster done job=%s source=%s output=%s crs=%s items=%d",
+                job_id, source.id, output.id, dst_crs, len(items),
+            )
+            output_data = {
+                "dataset": {
+                    "id": str(output.id),
+                    "name": output.name,
+                    "dataset_type": output.dataset_type,
+                }
+            }
+        except PermanentTaskError as exc:
+            session.rollback()
+            job = session.get(Job, job_uuid)
+            if job is not None:
+                fail_cfg = dict(job.config or {})
+                job.status = JobStatus.FAILED
+                job.logs = str(exc)[:4000]
+                job.finished_at = _now()
+                out_id = fail_cfg.get("output_dataset_id")
+                if out_id:
+                    failed_ds = session.get(Dataset, uuid.UUID(str(out_id)))
+                    if failed_ds is not None and failed_ds.status != DatasetStatus.READY:
+                        failed_ds.status = DatasetStatus.FAILED
+                session.commit()
+                _publish_job_event(job)
+            logger.error("reproject_raster permanent failure job=%s: %s", job_id, exc)
+        except Exception as exc:
+            session.rollback()
+            logger.exception("reproject_raster transient error job=%s", job_id)
             raise self.retry(exc=exc)
 
     if automation_run_id and automation_step_id and output_data is not None:

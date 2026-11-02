@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     CELERY_DATABASE_URL: str = ""
     # Broker and result backend
     REDIS_URL: str = ""
+    # Annotation vector-tile cache (separate Redis instance). Empty disables caching.
+    TILE_CACHE_REDIS_URL: str = ""
 
     # ── Object storage (MinIO in dev, S3 in prod) ─────────────────────────────
     # Internal endpoint used by the API container and Celery workers

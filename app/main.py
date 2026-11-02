@@ -1,7 +1,10 @@
+
 import logging
 import time
 from contextlib import asynccontextmanager
 from uuid import uuid4
+import httpx
+import redis.asyncio as aioredis
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,12 +29,35 @@ if settings.ENVIRONMENT != "development":
 async def lifespan(app: FastAPI):
     # In development, seed a dev org and user so the hardcoded dev claims in
     # ClerkAuthMiddleware resolve correctly without a real Clerk account.
+    
     if settings.ENVIRONMENT == "development":
         try:
             await _seed_dev_fixtures()
         except Exception:
             logger.warning("dev_seed_failed database not ready", exc_info=True)
-    yield
+
+    # Short timeouts: a slow or missing tile cache must not slow tile delivery.
+    tile_cache = (
+        aioredis.from_url(
+            settings.TILE_CACHE_REDIS_URL,
+            socket_timeout=0.2,
+            socket_connect_timeout=0.2,
+        )
+        if settings.TILE_CACHE_REDIS_URL
+        else None
+    )
+    app.state.tile_cache = tile_cache
+
+    async with httpx.AsyncClient(
+        base_url=settings.MARTIN_URL,
+        timeout=30.0,
+    ) as martin_client:
+        app.state.martin_client = martin_client
+        try:
+            yield
+        finally:
+            if tile_cache is not None:
+                await tile_cache.aclose()
 
 
 async def _seed_dev_fixtures() -> None:

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from geoalchemy2 import Geometry
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -64,6 +64,9 @@ class AnnotationSet(Base):
         Geometry(geometry_type="GEOMETRY", srid=4326, spatial_index=False), nullable=True
     )
     review_status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="raw")
+    # Vector-tile cache namespace. Advanced by DB triggers on every annotation
+    # write (see migration 049); never set from application code.
+    tile_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

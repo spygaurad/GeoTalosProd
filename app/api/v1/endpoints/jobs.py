@@ -22,7 +22,9 @@ from app.schemas.job import (
     InferenceJobCreate,
     JobRead,
     RasterizeAnnotationSetJobCreate,
+    ReprojectRasterJobCreate,
 )
+from app.services.conversion.reproject import parse_crs
 from app.services.job_service import JobService
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -261,6 +263,121 @@ async def create_convert_to_cog_job(
     on success ``config.result.dataset_id`` is the new dataset.
     """
     return await _create_convert_to_cog_job(
+        payload,
+        org_id=org_id,
+        db=db,
+        current_user=current_user,
+    )
+
+
+async def _create_reproject_raster_job(
+    payload: ReprojectRasterJobCreate,
+    *,
+    org_id: UUID,
+    db: AsyncSession,
+    current_user: User,
+) -> Job:
+    try:
+        dst_crs = parse_crs(payload.dst_crs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    dataset = await db.scalar(
+        select(Dataset).where(
+            Dataset.id == payload.dataset_id,
+            Dataset.organization_id == org_id,
+            Dataset.deleted_at.is_(None),
+        )
+    )
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if dataset.status == DatasetStatus.INGESTING:
+        raise HTTPException(
+            status_code=409,
+            detail="Dataset is currently ingesting and cannot be reprojected",
+        )
+
+    # Interpolating a class mask would invent class values that do not exist.
+    is_mask = dataset.dataset_type == DatasetType.SEGMENTATION_MASK
+    resampling = payload.resampling or ("nearest" if is_mask else "bilinear")
+    if is_mask and resampling != "nearest":
+        raise HTTPException(
+            status_code=422,
+            detail="Segmentation masks can only be reprojected with 'nearest' resampling",
+        )
+
+    item_query = select(DatasetItem).where(
+        DatasetItem.dataset_id == dataset.id,
+        DatasetItem.organization_id == org_id,
+        DatasetItem.is_active.is_(True),
+    )
+    requested_ids = payload.dataset_item_ids
+    if requested_ids:
+        item_query = item_query.where(DatasetItem.id.in_(requested_ids))
+    found = (await db.scalars(item_query)).all()
+    if requested_ids and len(found) != len(set(requested_ids)):
+        raise HTTPException(
+            status_code=404, detail="One or more dataset items were not found"
+        )
+    if not found:
+        raise HTTPException(
+            status_code=422, detail="Dataset has no active raster items to reproject"
+        )
+
+    if payload.project_id is not None:
+        project = await db.scalar(
+            select(Project).where(
+                Project.id == payload.project_id,
+                Project.organization_id == org_id,
+                Project.deleted_at.is_(None),
+            )
+        )
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    job = Job(
+        organization_id=org_id,
+        type=JobType.REPROJECT_RASTER,
+        status=JobStatus.QUEUED,
+        config={
+            "trigger": "api",
+            "source_dataset_id": str(dataset.id),
+            "dataset_item_ids": [str(item.id) for item in found],
+            "dst_crs": dst_crs,
+            "resampling": resampling,
+            "dataset_name": (payload.dataset_name or "").strip() or None,
+            "project_id": str(payload.project_id) if payload.project_id else None,
+        },
+        input_refs=[{"type": "dataset", "id": str(dataset.id)}],
+        created_by_user_id=current_user.id,
+        total_items=len(found),
+        processed_items=0,
+        failed_items=0,
+        progress=0.0,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    from app.workers.ingestion.tasks import reproject_raster  # noqa: PLC0415
+
+    reproject_raster.apply_async(args=[str(job.id)])
+    return job
+
+
+@router.post("/reproject-raster", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+async def create_reproject_raster_job(
+    payload: ReprojectRasterJobCreate,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Reproject a dataset's rasters into another CRS as a sibling COG dataset.
+
+    Does not modify the source dataset. Poll ``GET /jobs/{job_id}`` for progress;
+    on success ``config.result.dataset_id`` is the new dataset.
+    """
+    return await _create_reproject_raster_job(
         payload,
         org_id=org_id,
         db=db,

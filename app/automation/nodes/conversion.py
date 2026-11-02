@@ -10,6 +10,8 @@ conversions become first-class pipeline steps. Currently:
   COG dataset (deferred to a Celery job).
 - ``convert_to_cog``: dataset GeoTIFFs -> sibling Cloud-Optimized GeoTIFF
   dataset (deferred to a Celery job; the source dataset is not modified).
+- ``reproject_raster``: dataset rasters -> sibling COG dataset in another CRS
+  (deferred to a Celery job; the source dataset is not modified).
 - ``extract_raster_features``: threshold one imagery band of a dataset item
   into a new analysis annotation set (deferred to a Celery job).
 
@@ -387,6 +389,128 @@ def execute_convert_to_cog(session, config, input_data, **kwargs):
 
     from app.workers.ingestion.tasks import convert_dataset_to_cog
     convert_dataset_to_cog.delay(str(job.id))
+
+    return DeferToJob(job_id=str(job.id))
+
+
+@node(
+    type="reproject_raster",
+    category="data_operations",
+    label="Reproject Raster",
+    description=(
+        "Reproject a dataset's rasters into another coordinate reference system "
+        "(e.g. EPSG:3857) as a new COG dataset. The source dataset is not "
+        "modified; the output dataset is passed downstream once reprojection "
+        "finishes."
+    ),
+    inputs=[HandleDef(handle="dataset", type="dataset", label="Source Dataset")],
+    outputs=[HandleDef(handle="dataset", type="dataset", label="Reprojected Dataset")],
+    config_schema={
+        "type": "object",
+        "properties": {
+            "dst_crs": {
+                "type": "string",
+                "title": "Target CRS",
+                "description": "EPSG code, e.g. 'EPSG:3857' or '32618'.",
+            },
+            "resampling": {
+                "type": "string",
+                "title": "Resampling",
+                "enum": ["nearest", "bilinear", "cubic"],
+                "description": (
+                    "Leave empty for 'nearest' on segmentation masks and "
+                    "'bilinear' on imagery."
+                ),
+            },
+            "dataset_name": {
+                "type": "string",
+                "title": "Output Dataset Name",
+                "description": "Defaults to '<source> · <target CRS>'.",
+            },
+        },
+        "required": ["dst_crs"],
+    },
+    icon="globe",
+    color="#0EA5E9",
+)
+def execute_reproject_raster(session, config, input_data, **kwargs):
+    """Dispatch a Celery job that reprojects the input dataset into another CRS.
+
+    Validation mirrors ``POST /jobs/reproject-raster``; the warp itself runs
+    on the ingestion worker, and the step resumes with ``{"dataset": {...}}``.
+    """
+    from sqlalchemy import select
+
+    from app.automation.registry import DeferToJob
+    from app.core.enums import DatasetStatus, DatasetType, JobType
+    from app.models.dataset import Dataset
+    from app.models.dataset_item import DatasetItem
+    from app.models.job import Job
+    from app.services.conversion.reproject import RESAMPLING_METHODS, parse_crs
+
+    source = input_data.get("dataset") or {}
+    if isinstance(source, list):
+        source = source[0] if source else {}
+    source_id = source.get("id") if isinstance(source, dict) else None
+    if not source_id:
+        raise ValueError("reproject_raster requires an input dataset with an id")
+
+    dst_crs = parse_crs(str(config.get("dst_crs") or ""))
+
+    org_id = uuid.UUID(str(kwargs.get("organization_id")))
+    dataset = session.get(Dataset, uuid.UUID(str(source_id)))
+    if dataset is None or dataset.deleted_at is not None or dataset.organization_id != org_id:
+        raise ValueError(f"Dataset {source_id} not found")
+    if dataset.status == DatasetStatus.INGESTING:
+        raise ValueError("Dataset is currently ingesting and cannot be reprojected")
+
+    is_mask = dataset.dataset_type == DatasetType.SEGMENTATION_MASK
+    resampling = config.get("resampling") or ("nearest" if is_mask else "bilinear")
+    if resampling not in RESAMPLING_METHODS:
+        raise ValueError(f"Unknown resampling {resampling!r}")
+    if is_mask and resampling != "nearest":
+        raise ValueError("Segmentation masks can only be reprojected with 'nearest' resampling")
+
+    items = session.execute(
+        select(DatasetItem.id).where(
+            DatasetItem.dataset_id == dataset.id,
+            DatasetItem.organization_id == org_id,
+            DatasetItem.is_active.is_(True),
+        )
+    ).scalars().all()
+    if not items:
+        raise ValueError("Dataset has no active raster items to reproject")
+
+    run_id = kwargs.get("run_id")
+    project_id, creator_id = _run_context(session, run_id)
+
+    job = Job(
+        organization_id=org_id,
+        type=JobType.REPROJECT_RASTER.value,
+        status="queued",
+        config={
+            "trigger": "automation",
+            "source_dataset_id": str(dataset.id),
+            "dataset_item_ids": [str(item_id) for item_id in items],
+            "dst_crs": dst_crs,
+            "resampling": resampling,
+            "dataset_name": (config.get("dataset_name") or "").strip() or None,
+            "project_id": str(project_id) if project_id else None,
+            "automation_run_id": run_id,
+            "automation_step_id": kwargs.get("step_id"),
+        },
+        input_refs=[{"type": "dataset", "id": str(dataset.id)}],
+        created_by_user_id=creator_id,
+        total_items=len(items),
+        processed_items=0,
+        failed_items=0,
+        progress=0.0,
+    )
+    session.add(job)
+    session.flush()
+
+    from app.workers.ingestion.tasks import reproject_raster
+    reproject_raster.delay(str(job.id))
 
     return DeferToJob(job_id=str(job.id))
 

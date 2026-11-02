@@ -167,20 +167,26 @@ def execute_before_after_comparison(session, config, input_data, **kwargs):
     type="export_annotations",
     category="map_overlay",
     label="Export Annotations",
-    description="Export annotation set as GeoJSON to S3.",
+    description="Export annotation set as GeoJSON or CSV to S3.",
     inputs=[HandleDef(handle="annotation_set", type="annotation_set")],
     outputs=[HandleDef(handle="export_url", type="string")],
     config_schema={
         "type": "object",
         "properties": {
-            "format": {"type": "string", "enum": ["geojson"], "default": "geojson"},
+            "format": {"type": "string", "enum": ["geojson", "csv"], "default": "geojson"},
+            "crs": {
+                "type": "string",
+                "title": "Output CRS",
+                "default": "EPSG:4326",
+                "description": "Geometries are reprojected from EPSG:4326 when different.",
+            },
         },
     },
     icon="download",
     color="#06B6D4",
 )
 def execute_export_annotations(session, config, input_data, **kwargs):
-    """Export annotations as GeoJSON and upload to S3."""
+    """Export annotations as GeoJSON or CSV and upload to S3."""
     import tempfile
     import os
     from sqlalchemy import select, func
@@ -197,6 +203,7 @@ def execute_export_annotations(session, config, input_data, **kwargs):
     stmt = (
         select(
             Annotation.id,
+            Annotation.class_id,
             func.ST_AsGeoJSON(Annotation.geometry).label("geojson"),
             Annotation.confidence,
             Annotation.properties,
@@ -223,17 +230,37 @@ def execute_export_annotations(session, config, input_data, **kwargs):
             },
         })
 
-    geojson = json.dumps({"type": "FeatureCollection", "features": features})
+    from app.services.conversion.reproject import WGS84, parse_crs, reproject_features
+
+    export_crs = parse_crs(str(config.get("crs") or WGS84))
+    projected = export_crs != WGS84
+    if projected:
+        features = reproject_features(features, export_crs)
+
+    if config.get("format") == "csv":
+        from app.services.conversion.csv_geojson import features_to_csv
+
+        for feature, r in zip(features, rows):
+            feature["properties"]["class_id"] = str(r.class_id)
+        xy_columns = ("x", "y") if projected else ("longitude", "latitude")
+        body = features_to_csv(features, xy_columns=xy_columns)
+        extension, content_type = "csv", "text/csv"
+    else:
+        collection = {"type": "FeatureCollection", "features": features}
+        if projected:
+            collection["crs"] = {"type": "name", "properties": {"name": export_crs}}
+        body = json.dumps(collection)
+        extension, content_type = "geojson", "application/geo+json"
 
     org_id = uuid.UUID(kwargs["organization_id"])
-    s3_key = f"exports/automation/{kwargs['run_id']}/annotations.geojson"
+    s3_key = f"exports/automation/{kwargs['run_id']}/annotations.{extension}"
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".geojson", delete=False) as f:
-        f.write(geojson)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=f".{extension}", delete=False) as f:
+        f.write(body)
         tmp_path = f.name
 
     try:
-        storage_service.upload_from_path(org_id, s3_key, tmp_path, content_type="application/geo+json")
+        storage_service.upload_from_path(org_id, s3_key, tmp_path, content_type=content_type)
     finally:
         os.unlink(tmp_path)
 

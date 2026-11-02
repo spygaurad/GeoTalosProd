@@ -16,6 +16,9 @@ Currently provides:
   mask in the raster domain and rendered with class colors.
 - ``raster_metrics``: per-class IoU / precision / recall / F1 + accuracy between
   two raster class masks (handles differing size/extent/CRS).
+- ``csv_geojson``: GeoJSON features <-> CSV rows (WKT or longitude/latitude).
+- ``reproject``: raster -> COG in another CRS, and GeoJSON features to another
+  CRS for export.
 """
 
 from app.services.conversion.cog import convert_geotiff_to_cog
@@ -29,6 +32,11 @@ from app.services.conversion.raster_mask import (
 from app.services.conversion.raster_metrics import (
     RasterMetricsResult,
     compare_raster_masks,
+)
+from app.services.conversion.reproject import (
+    parse_crs,
+    reproject_features,
+    reproject_raster_to_cog,
 )
 from app.services.conversion.rasterize_mask import (
     RasterizeResult,
@@ -45,7 +53,10 @@ __all__ = [
     "convert_geotiff_to_cog",
     "dissolve_features_by_class",
     "mask_array_to_features",
+    "parse_crs",
     "raster_mask_to_features",
     "rasterize_annotation_sets_to_cog",
+    "reproject_features",
+    "reproject_raster_to_cog",
     "vectorize_raster_mask_set",
 ]

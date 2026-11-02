@@ -42,6 +42,8 @@ from app.schemas.annotation_set import (
 from app.services import storage_service
 from app.services.annotation_service import AnnotationService
 from app.services.annotation_set_service import AnnotationSetService
+from app.services.conversion.csv_geojson import csv_to_feature_collection, features_to_csv
+from app.services.conversion.reproject import WGS84, parse_crs, reproject_features
 from app.workers.ingestion.rasterio_utils import extract_unique_values
 
 logger = logging.getLogger(__name__)
@@ -73,7 +75,35 @@ class GeoJSONImportRequest(BaseModel):
     confidence_property: str | None = Field(default=None, max_length=64)
 
 
+class CSVImportRequest(BaseModel):
+    """Inline CSV import payload; rows are converted to GeoJSON features.
+
+    Geometry comes from ``wkt_column`` or ``lon_column`` + ``lat_column``; when
+    omitted, common header names are detected. Rows without a class id are
+    matched by ``class_name_column`` against the set's schema class names.
+    """
+    csv_text: str = Field(..., min_length=1)
+    filename: str | None = Field(default=None, max_length=255)
+    wkt_column: str | None = Field(default=None, max_length=64)
+    lon_column: str | None = Field(default=None, max_length=64)
+    lat_column: str | None = Field(default=None, max_length=64)
+    default_class_id: UUID | None = None
+    class_property: str = Field(default="class_id", max_length=64)
+    class_name_column: str | None = Field(default="class_name", max_length=64)
+    confidence_property: str | None = Field(default="confidence", max_length=64)
+
+
 # ── Private helpers ───────────────────────────────────────────────────────────
+
+async def _schema_class_names(db: AsyncSession, schema_id: UUID | None) -> dict[str, str]:
+    """Map class-id (str) -> class name for a schema."""
+    if schema_id is None:
+        return {}
+    rows = await db.execute(
+        select(AnnotationClass.id, AnnotationClass.name).where(AnnotationClass.schema_id == schema_id)
+    )
+    return {str(class_id): name for class_id, name in rows.all()}
+
 
 def _gdal_env_for_api() -> dict:
     endpoint = settings.AWS_ENDPOINT_URL.replace("http://", "").replace("https://", "")
@@ -331,6 +361,10 @@ async def export_annotation_set(
     db: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
+    try:
+        export_crs = parse_crs(payload.crs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     annotation_set = await AnnotationSetService(db).get_set(set_id, organization_id=org_id)
     ann_service = AnnotationService(db)
 
@@ -364,15 +398,29 @@ async def export_annotation_set(
         if offset >= total:
             break
 
-    body = {
-        "type": "FeatureCollection",
-        "features": features,
-        "total": total,
-        "annotation_set_id": str(annotation_set.id),
-        "annotation_set_name": annotation_set.name,
-    }
-    body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
-    filename = f"annotation-set-{annotation_set.id}.geojson"
+    # Annotations are stored in EPSG:4326; other CRSs are applied on the way out.
+    projected = export_crs != WGS84
+    if projected:
+        features = reproject_features(features, export_crs)
+
+    if payload.format == "csv":
+        class_names = await _schema_class_names(db, annotation_set.schema_id)
+        xy_columns = ("x", "y") if projected else ("longitude", "latitude")
+        body_bytes = features_to_csv(features, class_names, xy_columns=xy_columns).encode("utf-8")
+        extension, content_type = "csv", "text/csv"
+    else:
+        body = {
+            "type": "FeatureCollection",
+            "features": features,
+            "total": total,
+            "annotation_set_id": str(annotation_set.id),
+            "annotation_set_name": annotation_set.name,
+        }
+        if projected:
+            body["crs"] = {"type": "name", "properties": {"name": export_crs}}
+        body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        extension, content_type = "geojson", "application/geo+json"
+    filename = f"annotation-set-{annotation_set.id}.{extension}"
     s3_key = f"exports/annotation-sets/{annotation_set.id}/{uuid4().hex}/{filename}"
 
     def _upload_and_sign() -> str:
@@ -381,7 +429,7 @@ async def export_annotation_set(
             org_id,
             s3_key,
             body_bytes,
-            content_type="application/geo+json",
+            content_type=content_type,
         )
         return storage_service.generate_download_url(org_id, s3_key, payload.ttl_seconds)
 
@@ -401,6 +449,7 @@ async def export_annotation_set(
         s3_key=s3_key,
         download_url=download_url,
         expires_in=payload.ttl_seconds,
+        crs=export_crs,
     )
 
 
@@ -542,13 +591,95 @@ async def import_annotations_from_geojson(
     if annotation_set.schema_id is None:
         raise HTTPException(status_code=400, detail="Annotation set has no schema_id; cannot resolve classes")
 
-    body_bytes = json.dumps(payload.geojson, separators=(",", ":")).encode("utf-8")
+    return await _stage_feature_collection_import(
+        db,
+        org_id=org_id,
+        current_user=current_user,
+        set_id=set_id,
+        geojson=payload.geojson,
+        filename=payload.filename or f"import-{uuid4().hex}.geojson",
+        default_class_id=payload.default_class_id,
+        class_property=payload.class_property,
+        confidence_property=payload.confidence_property,
+    )
+
+
+@set_router.post("/import-csv", status_code=status.HTTP_202_ACCEPTED)
+async def import_annotations_from_csv(
+    set_id: UUID,
+    payload: CSVImportRequest,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Convert CSV rows to GeoJSON features and queue the standard import job."""
+    annotation_set = await AnnotationSetService(db).get_set(set_id, organization_id=org_id)
+    if annotation_set.schema_id is None:
+        raise HTTPException(status_code=400, detail="Annotation set has no schema_id; cannot resolve classes")
+    if len(payload.csv_text.encode("utf-8")) > MAX_IMPORT_FILE_BYTES:
+        raise HTTPException(status_code=413, detail=f"CSV exceeds {MAX_IMPORT_FILE_BYTES // (1024 * 1024)} MB limit")
+
+    try:
+        geojson = csv_to_feature_collection(
+            payload.csv_text,
+            wkt_column=payload.wkt_column,
+            lon_column=payload.lon_column,
+            lat_column=payload.lat_column,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not geojson["features"]:
+        raise HTTPException(status_code=422, detail="CSV has no data rows")
+
+    # Rows that carry a class name instead of a class id are matched against
+    # the set's schema, so a spreadsheet does not need UUIDs.
+    name_column = payload.class_name_column
+    if name_column:
+        names_to_ids = {
+            name.strip().lower(): class_id
+            for class_id, name in (await _schema_class_names(db, annotation_set.schema_id)).items()
+        }
+        for feature in geojson["features"]:
+            props = feature["properties"]
+            class_name = props.pop(name_column, None)
+            if not props.get(payload.class_property) and class_name:
+                class_id = names_to_ids.get(class_name.strip().lower())
+                if class_id:
+                    props[payload.class_property] = class_id
+
+    stem = (payload.filename or f"import-{uuid4().hex}").rsplit(".", 1)[0]
+    return await _stage_feature_collection_import(
+        db,
+        org_id=org_id,
+        current_user=current_user,
+        set_id=set_id,
+        geojson=geojson,
+        filename=f"{stem}.geojson",
+        default_class_id=payload.default_class_id,
+        class_property=payload.class_property,
+        confidence_property=payload.confidence_property,
+    )
+
+
+async def _stage_feature_collection_import(
+    db: AsyncSession,
+    *,
+    org_id: UUID,
+    current_user: User,
+    set_id: UUID,
+    geojson: dict[str, Any],
+    filename: str,
+    default_class_id: UUID | None,
+    class_property: str,
+    confidence_property: str | None,
+) -> dict[str, str]:
+    """Stage a FeatureCollection in S3 and queue ``bulk_import_annotations``."""
+    body_bytes = json.dumps(geojson, separators=(",", ":")).encode("utf-8")
     if len(body_bytes) > MAX_IMPORT_FILE_BYTES:
         raise HTTPException(status_code=413, detail=f"GeoJSON exceeds {MAX_IMPORT_FILE_BYTES // (1024 * 1024)} MB limit")
-    if payload.geojson.get("type") != "FeatureCollection":
+    if geojson.get("type") != "FeatureCollection":
         raise HTTPException(status_code=400, detail="geojson must be a FeatureCollection")
 
-    filename = payload.filename or f"import-{uuid4().hex}.geojson"
     job_uuid = uuid4()
     s3_key = f"imports/annotations/{job_uuid}/{filename}"
 
@@ -572,8 +703,8 @@ async def import_annotations_from_geojson(
         created_by_user_id=current_user.id,
         config={
             "annotation_set_id": str(set_id), "s3_key": s3_key, "filename": filename,
-            "default_class_id": str(payload.default_class_id) if payload.default_class_id else None,
-            "class_property": payload.class_property, "confidence_property": payload.confidence_property,
+            "default_class_id": str(default_class_id) if default_class_id else None,
+            "class_property": class_property, "confidence_property": confidence_property,
         },
         total_items=0, processed_items=0, failed_items=0, progress=0.0,
     )

@@ -37,6 +37,7 @@ class JobType(StrEnum):
     VECTORIZE_RASTER_MASK = "vectorize_raster_mask"
     RASTERIZE_ANNOTATION_SET = "rasterize_annotation_set"
     CONVERT_TO_COG = "convert_to_cog"
+    REPROJECT_RASTER = "reproject_raster"
     EXTRACT_RASTER_FEATURES = "extract_raster_features"
 
 

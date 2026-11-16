@@ -98,8 +98,14 @@ class AnnotationSetUpdate(ORMModel):
 
 
 class AnnotationSetExportRequest(ORMModel):
-    format: str = Field(default="geojson", pattern=r"^geojson$")
+    format: str = Field(default="geojson", pattern=r"^(geojson|csv)$")
     ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+    crs: str = Field(
+        default="EPSG:4326",
+        min_length=1,
+        max_length=64,
+        description="Output CRS; geometries are reprojected from EPSG:4326 when different.",
+    )
 
 
 class AnnotationSetExportResponse(ORMModel):
@@ -109,6 +115,7 @@ class AnnotationSetExportResponse(ORMModel):
     s3_key: str
     download_url: str
     expires_in: int
+    crs: str = "EPSG:4326"
 
 
 class AnnotationSetReviewUpdate(ORMModel):

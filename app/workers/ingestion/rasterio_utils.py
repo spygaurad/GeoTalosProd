@@ -790,6 +790,14 @@ def validate_cog(s3_uri: str, s3_config: dict) -> tuple[bool, list[str]]:
     return not hard_failure, issues
 
 
+def is_cloud_optimized_geotiff(
+    s3_uri: str,
+    s3_config: dict,
+) -> tuple[bool, bool, list[str]]:
+    is_valid, issues = validate_cog(s3_uri, s3_config)
+    return is_valid, is_valid and not issues, issues
+
+
 def extract_unique_values(
     s3_uri: str,
     s3_config: dict,

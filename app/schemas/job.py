@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import Field, model_validator
@@ -23,6 +23,37 @@ class JobRead(ORMModel):
     finished_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class ConvertToCogJobCreate(ORMModel):
+    """Payload for ``POST /jobs/convert-to-cog``."""
+
+    dataset_id: UUID
+    dataset_item_ids: list[UUID] | None = Field(
+        default=None,
+        min_length=1,
+        description="If omitted, every active item on the dataset is converted.",
+    )
+    dataset_name: str | None = Field(default=None, max_length=255)
+    project_id: UUID | None = None
+
+
+class ReprojectRasterJobCreate(ORMModel):
+    """Payload for ``POST /jobs/reproject-raster``."""
+
+    dataset_id: UUID
+    dst_crs: str = Field(min_length=1, max_length=64, description="Target CRS, e.g. 'EPSG:3857'.")
+    resampling: Literal["nearest", "bilinear", "cubic"] | None = Field(
+        default=None,
+        description="Defaults to 'nearest' for segmentation masks and 'bilinear' otherwise.",
+    )
+    dataset_item_ids: list[UUID] | None = Field(
+        default=None,
+        min_length=1,
+        description="If omitted, every active item on the dataset is reprojected.",
+    )
+    dataset_name: str | None = Field(default=None, max_length=255)
+    project_id: UUID | None = None
 
 
 class InferenceJobCreate(ORMModel):
@@ -73,3 +104,35 @@ class InferenceJobCreate(ORMModel):
         if minx < -180 or maxx > 180 or miny < -90 or maxy > 90:
             raise ValueError("aoi_bbox must be within EPSG:4326 bounds")
         return self
+
+
+class ExtractRasterFeaturesJobCreate(ORMModel):
+    """Payload for ``POST /jobs/extract-raster-features``."""
+
+    dataset_item_id: UUID
+    schema_id: UUID
+    output_class_id: UUID
+    band_index: int = Field(default=1, ge=1)
+    threshold_min: float
+    threshold_max: float | None = None
+    min_area_px: float = Field(default=0.0, ge=0)
+    simplify_tolerance: float | None = None
+    connectivity: Literal[4, 8] = 4
+    dissolve: bool = False
+    annotation_set_name: str | None = None
+    index: Literal["band"] = "band"
+
+    @model_validator(mode="after")
+    def validate_threshold_range(self):
+        if self.threshold_max is not None and self.threshold_max < self.threshold_min:
+            raise ValueError("threshold_max must be greater than or equal to threshold_min")
+        return self
+
+
+class RasterizeAnnotationSetJobCreate(ORMModel):
+    """Payload for ``POST /jobs/rasterize-annotation-set``."""
+
+    annotation_set_ids: list[UUID] = Field(min_length=1)
+    reference_dataset_id: UUID | None = None
+    resolution_m: float | None = Field(default=None, gt=0)
+    dataset_name: str | None = Field(default=None, max_length=255)

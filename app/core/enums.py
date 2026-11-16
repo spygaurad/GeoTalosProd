@@ -41,6 +41,9 @@ class JobType(StrEnum):
     FINETUNE_MODEL = "finetune_model"
     EXEMPLAR_SCAN = "exemplar_scan"
     SAM3_AUTO_ANNOTATE = "sam3_auto_annotate"
+    CONVERT_TO_COG = "convert_to_cog"
+    REPROJECT_RASTER = "reproject_raster"
+    EXTRACT_RASTER_FEATURES = "extract_raster_features"
 
 
 class MapLayerSourceType(StrEnum):

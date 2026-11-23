@@ -66,6 +66,12 @@ postgres:
       schema: public
       function: annotation_set_mvt
 
+    # Vector layers uploaded by an organization (feature_layers). The FastAPI proxy passes
+    # org_id and layer after authenticating the caller (migration 077).
+    feature_layer_mvt:
+      schema: public
+      function: feature_layer_mvt
+
     # Public reference layer served live from PostGIS (migration 074). Small layers
     # only; large ones are PMTiles below. Only names in REFERENCE_LAYERS
     # (app/api/v1/endpoints/reference_layers.py) are exposed by the API.

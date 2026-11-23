@@ -78,7 +78,7 @@ async def list_vector_layers(
                 "geometry_types": sorted(t.lower() for t in types),
                 "attributes": list(keys),
                 "created_at": created,
-                "tile_url": f"/api/v1/feature-layers/layers/{name}/tiles/{{z}}/{{x}}/{{y}}.pbf",
+                "tile_url": f"/api/v1/feature-layers/layers/{quote(name, safe='')}/tiles/{{z}}/{{x}}/{{y}}.pbf",
                 "tile_layer": "feature_layer_mvt",
             }
         )
@@ -101,7 +101,13 @@ async def upload_vector_layer(
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File is larger than 50 MB")
-    data = await request.body()
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_UPLOAD_BYTES:  # a chunked upload has no content-length to check up front
+            raise HTTPException(status_code=413, detail="File is larger than 50 MB")
+        chunks.append(chunk)
+    data = b"".join(chunks)
     try:
         features, skipped, reasons = parse_upload(filename, data, crs=crs)
     except UploadError as exc:

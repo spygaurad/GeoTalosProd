@@ -130,3 +130,12 @@ def test_tile_out_of_bounds_never_reaches_martin(client, monkeypatch):
 
     assert client.get("/api/v1/feature-layers/layers/x/tiles/8/256/0.pbf").status_code == 422
     get.assert_not_called()
+
+
+def test_upload_over_the_cap_is_413_without_reading_it_all(client, db, monkeypatch):
+    monkeypatch.setattr("app.api.v1.endpoints.feature_layers.MAX_UPLOAD_BYTES", 10)
+
+    r = client.post("/api/v1/feature-layers/upload?filename=a.geojson", content=b"x" * 50)
+
+    assert r.status_code == 413
+    db.add_all.assert_not_called()

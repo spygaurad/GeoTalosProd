@@ -49,13 +49,8 @@ postgres:
       geometry_column: geometry
       geometry_type: Polygon
 
-    # Static vector features (roads, buildings, boundaries)
-    feature_layers:
-      schema: public
-      table: feature_layers
-      srid: 4326
-      geometry_column: geometry
-      geometry_type: Geometry
+    # feature_layers is NOT a table source: it holds organization uploads and martin_reader
+    # bypasses RLS. It is served only through feature_layer_mvt() behind the API (migration 077).
 
   # Function sources — parameterised SQL functions returning ST_AsMVT bytes.
   functions:

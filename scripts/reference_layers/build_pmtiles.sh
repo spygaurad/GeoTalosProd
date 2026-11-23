@@ -33,9 +33,14 @@ convert() {
 tile() {
   local name=$1 title=$2 desc=$3 attrib=$4 maxz=$5 f inputs=(); shift 5
   for f in "$WORK/$name"/*.geojsonl; do inputs+=("/work/$name/${f##*/}"); done
-  # 250 KB gzipped tile cap (the 500 KB default is too heavy for a browser at low zoom)
+  # 250 KB gzipped tile cap (the 500 KB default is too heavy for a browser at low zoom).
+  # When a tile is too big, drop the smallest features first (the tiny concession boxes
+  # nobody can see at regional zoom) and simplify harder below maxzoom; full detail at maxzoom.
+  # Extra args go last, so a layer can override these, e.g. -Z7 (min zoom) or a smaller -M
+  # (dense layers: small boxes are dropped at low zoom until the tile fits; full detail once it does).
   run $TIP tippecanoe -q -o "/out/$name.pmtiles" --force -l "$name" -n "$title" -N "$desc" \
-    --attribution="$attrib" -Z0 -z"$maxz" --drop-densest-as-needed -M 250000 -P "$@" "${inputs[@]}"
+    --attribution="$attrib" -Z0 -z"$maxz" --drop-smallest-as-needed --simplification=4 \
+    --simplify-only-low-zooms -M 250000 -P "$@" "${inputs[@]}"
 }
 
 build_mrds() {
@@ -65,7 +70,7 @@ build_gfw_mining() {
       iso3,conc_name,conc_type,conc_stat,company,mineral,source -nlt PROMOTE_TO_MULTI -dim XY
   done
   tile gfw_mining "Mining Concessions (GFW)" "Mining concessions, 2014-2025, select countries" \
-    "<a href=\"https://www.globalnaturewatch.org\">Mining concessions, WRI / Global Nature Watch</a> $CC" 12 --extend-zooms-if-still-dropping
+    "<a href=\"https://www.globalnaturewatch.org\">Mining concessions, WRI / Global Nature Watch</a> $CC" 12 --extend-zooms-if-still-dropping -Z7 -M 120000
 }
 build_raisg_protected_areas() {
   local f
@@ -83,7 +88,7 @@ build_raisg_mining() {
       objectid,pais,nombre,cia,situacion,tipo_minerio,area_sig_ha -nlt PROMOTE_TO_MULTI
   done
   tile raisg_mining "Amazon Mining (RAISG)" "Mining claims and concessions in the Amazon region" \
-    '<a href="https://www.raisg.org/en/maps/">RAISG</a> (Red Amazónica de Información Socioambiental Georreferenciada)' 12 --extend-zooms-if-still-dropping
+    '<a href="https://www.raisg.org/en/maps/">RAISG</a> (Red Amazónica de Información Socioambiental Georreferenciada)' 12 --extend-zooms-if-still-dropping -Z7 -M 120000
 }
 build_cofopri() {
   local f

@@ -39,6 +39,9 @@ LAYER_META: dict[str, dict] = {
     "hydrorivers": {"geometry": "line", "attributes": [
         _a("ORD_STRA", "Strahler order", "number"), _a("DIS_AV_CMS", "Mean flow", "number", "m3/s"),
         _a("LENGTH_KM", "Length", "number", "km")]},
+    "osm_roads": {"geometry": "line", "attributes": [
+        _a("fclass", "Road class", "category"), _a("name", "Name"), _a("ref", "Reference"),
+        _a("maxspeed", "Speed limit", "number", "km/h")]},
     "mrds": {"geometry": "point", "attributes": [
         _a("SITE_NAME", "Site"), _a("DEV_STAT", "Development status", "category"), _a("CODE_LIST", "Commodities")]},
 }

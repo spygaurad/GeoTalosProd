@@ -6,6 +6,7 @@
 #   TILE_ONLY=1 ... build_pmtiles.sh <name>   reuse the cleaned GeoJSONL in WORK, re-tile only
 #
 # Layers: cofopri raisg_protected_areas mrds gfw_logging hydrorivers raisg_mining gfw_mining
+# Also: osm_roads (needs SRC/osm_roads/<country>-latest-free.shp.zip, Geofabrik shapefiles)
 # Heatmap point tilesets (build after their polygon layer): raisg_mining_density gfw_mining_density
 # (Ramsar is small and lives in PostGIS: see load_ramsar.sh.) Source links: README.md.
 # SRC is laid out like the publishers' zips: usgs_mrds/, hydrorivers/, gfw_logging/,
@@ -99,6 +100,22 @@ build_cofopri() {
   done
   tile cofopri "Peru Native Communities (COFOPRI)" "Comunidades nativas, COFOPRI / MINAGRI" \
     '<a href="https://geocatmin.ingemmet.gob.pe/">Comunidades nativas, COFOPRI / MINAGRI Peru (GEOCATMIN)</a>' 12 --extend-zooms-if-still-dropping
+}
+
+build_osm_roads() {
+  # Geofabrik shapefiles, one zip per country. Footpaths, steps, service and residential streets
+  # are left out (millions of tiny lines); what stays is the network that reaches mining and
+  # logging areas: main roads, unclassified roads and tracks.
+  local c
+  for c in bolivia brazil-norte colombia ecuador guyana guyane peru suriname venezuela; do
+    convert osm_roads "$c.geojsonl" "$(z osm_roads/$c-latest-free.shp.zip gis_osm_roads_free_1.shp)" fclass,name,ref,maxspeed \
+      -where "fclass IN ('motorway','motorway_link','trunk','trunk_link','primary','primary_link','secondary','secondary_link','tertiary','tertiary_link','unclassified','track')" \
+      -nlt PROMOTE_TO_MULTI
+  done
+  # Class gate per zoom, like HydroRIVERS: only the big roads when zoomed out, tracks from zoom 10.
+  tile osm_roads "OpenStreetMap roads (Amazon region)" "Main roads, unclassified roads and tracks, Geofabrik extracts" \
+    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> (ODbL), via Geofabrik' 12 -Z4 \
+    -j '{"*":["any",["in","fclass","motorway","motorway_link","trunk","trunk_link","primary","primary_link"],["all",[">=","$zoom",6],["in","fclass","secondary","secondary_link"]],["all",[">=","$zoom",8],["in","fclass","tertiary","tertiary_link"]],["all",[">=","$zoom",9],["==","fclass","unclassified"]],["all",[">=","$zoom",10],["==","fclass","track"]]]}'
 }
 
 # density NAME SOURCE_DIR WEIGHT_SQL: one point per polygon (a point inside it), summed into clusters

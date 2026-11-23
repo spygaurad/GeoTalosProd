@@ -101,3 +101,4 @@ pmtiles:
     gfw_logging: s3://reference-tiles/gfw_logging.pmtiles
     hydrorivers: s3://reference-tiles/hydrorivers.pmtiles
     mrds: s3://reference-tiles/mrds.pmtiles
+    osm_roads: s3://reference-tiles/osm_roads.pmtiles

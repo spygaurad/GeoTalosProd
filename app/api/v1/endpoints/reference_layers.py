@@ -46,6 +46,7 @@ REFERENCE_LAYERS: tuple[str, ...] = (
     "gfw_logging",
     "hydrorivers",
     "mrds",
+    "osm_roads",
 )
 
 # Static tilesets only change when rebuilt, and the rebuild is deployed together

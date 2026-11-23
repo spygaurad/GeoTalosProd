@@ -106,3 +106,21 @@ def test_list_skips_unavailable_layer(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"items": []}
+
+
+def test_large_tile_is_gzipped_when_accepted(client, monkeypatch):
+    """httpx unzips Martin's gzip, so the API must zip vector tiles again on the way out."""
+    body = b"mvt" * 2000
+    tile = httpx.Response(200, content=body, headers={"content-type": "application/x-protobuf"})
+    monkeypatch.setattr(client.app.state.martin_client, "get", AsyncMock(return_value=tile))
+
+    zipped = client.get("/api/v1/reference-layers/ramsar/tiles/8/139/64.pbf", headers={"Accept-Encoding": "gzip"})
+    assert zipped.status_code == 200
+    assert zipped.headers["content-encoding"] == "gzip"
+    assert zipped.headers["vary"] == "Accept-Encoding"
+    assert zipped.content == body  # httpx unzips it back
+    assert int(zipped.headers["content-length"]) < len(body)
+
+    raw = client.get("/api/v1/reference-layers/ramsar/tiles/8/139/64.pbf", headers={"Accept-Encoding": "identity"})
+    assert "content-encoding" not in raw.headers
+    assert raw.content == body

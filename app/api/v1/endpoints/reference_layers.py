@@ -15,7 +15,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Path, Request
 from fastapi.responses import Response
 
-from app.services.tile_proxy import forward_tile
+from app.services.tile_proxy import forward_tile, gzip_if_accepted
 
 logger = logging.getLogger(__name__)
 
@@ -95,4 +95,4 @@ async def get_reference_layer_tile(
         default_content_type="application/x-protobuf",
     )
     response.headers["Cache-Control"] = _CACHE_CONTROL
-    return response
+    return gzip_if_accepted(request, response)

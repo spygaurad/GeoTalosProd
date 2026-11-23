@@ -6,6 +6,7 @@
 #   TILE_ONLY=1 ... build_pmtiles.sh <name>   reuse the cleaned GeoJSONL in WORK, re-tile only
 #
 # Layers: cofopri raisg_protected_areas mrds gfw_logging hydrorivers raisg_mining gfw_mining
+# Heatmap point tilesets (build after their polygon layer): raisg_mining_density gfw_mining_density
 # (Ramsar is small and lives in PostGIS: see load_ramsar.sh.) Source links: README.md.
 # SRC is laid out like the publishers' zips: usgs_mrds/, hydrorivers/, gfw_logging/,
 # gfw_mining/, raisg/{protected_areas,mining}/, indigenous_registries/peru/cofopri_minagri/.
@@ -99,6 +100,25 @@ build_cofopri() {
   tile cofopri "Peru Native Communities (COFOPRI)" "Comunidades nativas, COFOPRI / MINAGRI" \
     '<a href="https://geocatmin.ingemmet.gob.pe/">Comunidades nativas, COFOPRI / MINAGRI Peru (GEOCATMIN)</a>' 12 --extend-zooms-if-still-dropping
 }
+
+# density NAME SOURCE_DIR WEIGHT_SQL: one point per polygon (a point inside it), summed into clusters
+# at low zoom. The UI draws these as a heatmap instead of the dense boxes. Weight is a SQL
+# expression on the source attributes (area in hectares, or 1 to count polygons); it becomes
+# the attribute "w", and tippecanoe adds point_count to each cluster. Run after the polygon
+# layer has been converted (needs its GeoJSONL in WORK/SOURCE_DIR).
+density() {
+  local name=$1 srcdir=$2 weight=$3 f base inputs=()
+  for f in "$WORK/$srcdir"/*.geojsonl; do
+    base=${f##*/}; base=${base%.geojsonl}
+    [[ -n ${TILE_ONLY:-} ]] || run $GDAL ogr2ogr -f GeoJSONSeq "/work/$name/$base.geojsonl" "/work/$srcdir/$base.geojsonl" \
+      -dialect SQLite -sql "SELECT ST_PointOnSurface(geometry) AS geometry, CAST($weight AS REAL) AS w FROM \"$base\""
+    inputs+=("/work/$name/$base.geojsonl")
+  done
+  run $TIP tippecanoe -q -o "/out/$name.pmtiles" --force -l "$name" -n "$name" -Z0 -z12 -r1 \
+    --cluster-distance=10 --accumulate-attribute=w:sum "${inputs[@]}"
+}
+build_raisg_mining_density() { density raisg_mining_density raisg_mining area_sig_ha; }
+build_gfw_mining_density() { density gfw_mining_density gfw_mining 1; }
 
 names=("${@:-cofopri raisg_protected_areas mrds gfw_logging hydrorivers raisg_mining gfw_mining}")
 for n in ${names[@]}; do

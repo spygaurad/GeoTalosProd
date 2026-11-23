@@ -89,6 +89,9 @@ pmtiles:
     raisg_protected_areas: s3://reference-tiles/raisg_protected_areas.pmtiles
     raisg_mining: s3://reference-tiles/raisg_mining.pmtiles
     gfw_mining: s3://reference-tiles/gfw_mining.pmtiles
+    # Heatmap point tilesets (one point per mining polygon), see build_pmtiles.sh density()
+    raisg_mining_density: s3://reference-tiles/raisg_mining_density.pmtiles
+    gfw_mining_density: s3://reference-tiles/gfw_mining_density.pmtiles
     gfw_logging: s3://reference-tiles/gfw_logging.pmtiles
     hydrorivers: s3://reference-tiles/hydrorivers.pmtiles
     mrds: s3://reference-tiles/mrds.pmtiles

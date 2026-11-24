@@ -70,6 +70,13 @@ def test_unusable_files_raise_upload_error(name, data):
         parse_upload(name, data)
 
 
+def test_csv_numbers_become_numbers_but_codes_stay_text():
+    features, _, _ = parse_upload("p.csv", b"name,lon,lat,prob,count,code\nA,-70,-12,0.75,3,00123\n")
+
+    props = features[0]["properties"]
+    assert props["prob"] == 0.75 and props["count"] == 3 and props["code"] == "00123"
+
+
 # --- routes ----------------------------------------------------------------
 
 
@@ -139,3 +146,37 @@ def test_upload_over_the_cap_is_413_without_reading_it_all(client, db, monkeypat
 
     assert r.status_code == 413
     db.add_all.assert_not_called()
+
+
+def test_points_tiles_pass_weight_to_martin(client, monkeypatch):
+    get = AsyncMock(return_value=httpx.Response(200, content=b"mvt", headers={"content-type": "application/x-protobuf"}))
+    monkeypatch.setattr(client.app.state.martin_client, "get", get)
+
+    assert client.get("/api/v1/feature-layers/layers/sites/tiles/8/78/136.pbf?points=true&weight=prob").status_code == 200
+    assert get.await_args.args[0].endswith("&layer=sites&points=true&weight=prob")
+
+    client.get("/api/v1/feature-layers/layers/sites/tiles/8/78/136.pbf?weight=prob")  # weight alone is ignored
+    assert "weight" not in get.await_args.args[0]
+
+
+def _attrs(rows):
+    result = MagicMock()
+    result.all.return_value = rows
+    return result
+
+
+def test_style_weight_must_be_a_numeric_attribute(client, db):
+    db.execute = AsyncMock(return_value=_attrs([("name", False, None), ("prob", True, 0.9)]))
+
+    bad = client.put("/api/v1/feature-layers/layers/sites/style", json={"mode": "heatmap", "heatmap": {"weight": "name"}})
+    ok = client.put("/api/v1/feature-layers/layers/sites/style", json={"mode": "heatmap", "heatmap": {"weight": "prob"}})
+
+    assert bad.status_code == 422
+    assert ok.status_code == 200 and ok.json()["style"]["heatmap"]["weight"] == "prob"
+    assert db.execute.await_args.args[1]["layer"] == "upload:sites"
+
+
+def test_style_on_missing_layer_is_404(client, db):
+    db.execute = AsyncMock(return_value=_attrs([]))
+
+    assert client.put("/api/v1/feature-layers/layers/nope/style", json={"colour": "#112233"}).status_code == 404

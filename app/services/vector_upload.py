@@ -7,6 +7,7 @@ skipped and counted, and the first few reasons are returned so the user can fix 
 """
 
 import json
+import re
 from typing import Any
 
 from app.core.geometry import validate_wgs84_geometry
@@ -27,6 +28,18 @@ def _scalar(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     return json.dumps(value, ensure_ascii=False)
+
+
+# Plain decimal numbers only: "00123" (a code) and "1e400" stay text.
+_NUMBER = re.compile(r"-?(0|[1-9]\d*)(\.\d+)?")
+
+
+def _csv_value(value: Any) -> Any:
+    """CSV cells arrive as text. Numbers become numbers so they can weight a heatmap."""
+    if isinstance(value, str) and _NUMBER.fullmatch(value.strip()):
+        v = value.strip()
+        return float(v) if "." in v else int(v)
+    return value
 
 
 def _features_of(doc: Any) -> list[dict]:
@@ -72,6 +85,8 @@ def parse_upload(filename: str, data: bytes, *, crs: str | None = None) -> tuple
         if name.endswith(".csv"):
             text = data.decode("utf-8-sig")
             features = csv_to_feature_collection(text)["features"]
+            for f in features:
+                f["properties"] = {k: _csv_value(v) for k, v in (f.get("properties") or {}).items()}
         elif name.endswith((".geojson", ".json")):
             features = _features_of(json.loads(data.decode("utf-8-sig")))
         else:

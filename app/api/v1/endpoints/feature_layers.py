@@ -1,3 +1,4 @@
+import json
 import re
 from urllib.parse import quote
 from uuid import UUID
@@ -21,6 +22,7 @@ from app.schemas.feature_layer import (
 )
 from app.models.feature_layer import FeatureLayer
 from app.services.feature_layer_service import FeatureLayerService
+from app.services.reference_layer_meta import LayerStyle
 from app.services.tile_proxy import forward_tile, gzip_if_accepted
 from app.services.vector_upload import MAX_UPLOAD_BYTES, UploadError, parse_upload
 
@@ -41,12 +43,40 @@ def _clean_layer_name(raw: str) -> str:
     return name
 
 
+async def _attributes(db: AsyncSession, org_id: UUID, name: str) -> list[dict]:
+    """Same shape as a reference layer's descriptor. A column whose values are all numbers can
+    weight a heatmap; ``max`` lets the UI scale it (a probability tops out at 1, an area at 1e5)."""
+    rows = (
+        await db.execute(
+            text(
+                "SELECT p.key, bool_and(jsonb_typeof(p.value) IN ('number', 'null')) "
+                "AND bool_or(jsonb_typeof(p.value) = 'number'), "
+                "max(CASE WHEN jsonb_typeof(p.value) = 'number' THEN (p.value #>> '{}')::float8 END) "
+                "FROM feature_layers f, jsonb_each(CASE WHEN jsonb_typeof(f.properties) = 'object' "
+                "THEN f.properties ELSE '{}'::jsonb END) p "
+                "WHERE f.organization_id = :org AND f.layer_name = :l GROUP BY p.key ORDER BY p.key"
+            ),
+            {"org": org_id, "l": name},
+        )
+    ).all()
+    return [
+        {"name": k, "label": k, "kind": "number" if numeric else "text", "unit": None,
+         "weight": bool(numeric), "max": top if numeric else None}
+        for k, numeric, top in rows
+    ]
+
+
+def _style_key(name: str) -> str:
+    return f"upload:{name}"
+
+
 @router.get("/layers")
 async def list_vector_layers(
     org_id: UUID = Depends(require_org_role("org:viewer")),
     db: AsyncSession = Depends(get_session),
 ) -> dict:
-    """The organization's uploaded layers with feature count, bounds, geometry types and attributes."""
+    """The organization's uploaded layers with feature count, bounds, geometry types, attribute
+    descriptors and the saved style."""
     rows = (
         await db.execute(
             text(
@@ -58,31 +88,78 @@ async def list_vector_layers(
             {"org": org_id},
         )
     ).all()
+    styles = dict(
+        (
+            await db.execute(
+                text("SELECT layer, style FROM reference_layer_styles WHERE organization_id = :org AND layer LIKE 'upload:%'"),
+                {"org": org_id},
+            )
+        ).all()
+    )
     items = []
     for name, n, x0, y0, x1, y1, types, created in rows:
-        keys = (
-            await db.execute(
-                text(
-                    "SELECT DISTINCT jsonb_object_keys(properties) AS k FROM "
-                    "(SELECT properties FROM feature_layers WHERE organization_id = :org AND layer_name = :l "
-                    "AND jsonb_typeof(properties) = 'object' LIMIT 200) s ORDER BY k"
-                ),
-                {"org": org_id, "l": name},
-            )
-        ).scalars().all()
+        tiles = f"/api/v1/feature-layers/layers/{quote(name, safe='')}/tiles/{{z}}/{{x}}/{{y}}.pbf"
         items.append(
             {
                 "name": name,
                 "feature_count": n,
                 "bounds": [x0, y0, x1, y1],
                 "geometry_types": sorted(t.lower() for t in types),
-                "attributes": list(keys),
+                "attributes": await _attributes(db, org_id, name),
+                "style": styles.get(_style_key(name), {}),
                 "created_at": created,
-                "tile_url": f"/api/v1/feature-layers/layers/{quote(name, safe='')}/tiles/{{z}}/{{x}}/{{y}}.pbf",
+                "tile_url": tiles,
+                # One point per feature; add &weight=<attribute> to weight it.
+                "density_tile_url": f"{tiles}?points=true",
                 "tile_layer": "feature_layer_mvt",
             }
         )
     return {"items": items}
+
+
+@router.put("/layers/{layer_name}/style")
+async def set_vector_layer_style(
+    layer_name: str,
+    style: LayerStyle,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Same style object as the reference layers. Any numeric attribute can weight the heatmap."""
+    attrs = await _attributes(db, org_id, layer_name)
+    if not attrs and not await db.scalar(
+        text("SELECT 1 FROM feature_layers WHERE organization_id = :org AND layer_name = :l LIMIT 1"),
+        {"org": org_id, "l": layer_name},
+    ):
+        raise HTTPException(status_code=404, detail="Layer not found")
+    weight = style.heatmap.weight if style.heatmap else None
+    if weight is not None and weight not in {a["name"] for a in attrs if a["weight"]}:
+        raise HTTPException(status_code=422, detail=f"{weight} is not a numeric attribute of {layer_name}")
+    stored = style.model_dump(exclude_unset=True)
+    await db.execute(
+        text(
+            "INSERT INTO reference_layer_styles (organization_id, layer, style, updated_by) "
+            "VALUES (:org, :layer, CAST(:style AS jsonb), :user) "
+            "ON CONFLICT (organization_id, layer) DO UPDATE "
+            "SET style = EXCLUDED.style, updated_by = EXCLUDED.updated_by, updated_at = now()"
+        ),
+        {"org": org_id, "layer": _style_key(layer_name), "style": json.dumps(stored), "user": current_user.id},
+    )
+    await db.commit()
+    return {"layer": layer_name, "style": stored}
+
+
+@router.delete("/layers/{layer_name}/style", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_vector_layer_style(
+    layer_name: str,
+    org_id: UUID = Depends(require_org_role("org:member")),
+    db: AsyncSession = Depends(get_session),
+):
+    await db.execute(
+        text("DELETE FROM reference_layer_styles WHERE organization_id = :org AND layer = :layer"),
+        {"org": org_id, "layer": _style_key(layer_name)},
+    )
+    await db.commit()
 
 
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
@@ -151,6 +228,8 @@ async def get_vector_layer_tile(
     z: int = Path(..., ge=0, le=22),
     x: int = Path(..., ge=0),
     y: int = Path(..., ge=0),
+    points: bool = Query(False, description="One point per feature, for the heatmap"),
+    weight: str | None = Query(None, max_length=120, description="Numeric attribute sent as `w` with points"),
     org_id: UUID = Depends(require_org_role("org:viewer")),
 ) -> Response:
     if x >= 2**z or y >= 2**z:
@@ -158,7 +237,9 @@ async def get_vector_layer_tile(
     # org_id comes from the caller's session, so one organization can never read another's layer.
     response = await forward_tile(
         request.app.state.martin_client,
-        f"/feature_layer_mvt/{z}/{x}/{y}?org_id={org_id}&layer={quote(layer_name, safe='')}",
+        f"/feature_layer_mvt/{z}/{x}/{y}?org_id={org_id}&layer={quote(layer_name, safe='')}"
+        + ("&points=true" if points else "")
+        + (f"&weight={quote(weight, safe='')}" if points and weight else ""),
         default_content_type="application/x-protobuf",
     )
     response.headers["Cache-Control"] = "private, no-store"
@@ -175,6 +256,10 @@ async def delete_vector_layer(
     result = await db.execute(
         text("DELETE FROM feature_layers WHERE organization_id = :org AND layer_name = :l"),
         {"org": org_id, "l": layer_name},
+    )
+    await db.execute(
+        text("DELETE FROM reference_layer_styles WHERE organization_id = :org AND layer = :layer"),
+        {"org": org_id, "layer": _style_key(layer_name)},
     )
     await db.commit()
     if not result.rowcount:

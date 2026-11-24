@@ -49,13 +49,8 @@ postgres:
       geometry_column: geometry
       geometry_type: Polygon
 
-    # Static vector features (roads, buildings, boundaries)
-    feature_layers:
-      schema: public
-      table: feature_layers
-      srid: 4326
-      geometry_column: geometry
-      geometry_type: Geometry
+    # feature_layers is NOT a table source: it holds organization uploads and martin_reader
+    # bypasses RLS. It is served only through feature_layer_mvt() behind the API (migration 077).
 
   # Function sources — parameterised SQL functions returning ST_AsMVT bytes.
   functions:
@@ -65,6 +60,12 @@ postgres:
     annotation_set_mvt:
       schema: public
       function: annotation_set_mvt
+
+    # Vector layers uploaded by an organization (feature_layers). The FastAPI proxy passes
+    # org_id and layer after authenticating the caller (migration 077).
+    feature_layer_mvt:
+      schema: public
+      function: feature_layer_mvt
 
     # Public reference layer served live from PostGIS (migration 074). Small layers
     # only; large ones are PMTiles below. Only names in REFERENCE_LAYERS
@@ -89,6 +90,15 @@ pmtiles:
     raisg_protected_areas: s3://reference-tiles/raisg_protected_areas.pmtiles
     raisg_mining: s3://reference-tiles/raisg_mining.pmtiles
     gfw_mining: s3://reference-tiles/gfw_mining.pmtiles
+    # Heatmap point tilesets (one point per mining polygon), see build_pmtiles.sh density()
+    raisg_mining_density: s3://reference-tiles/raisg_mining_density.pmtiles
+    gfw_mining_density: s3://reference-tiles/gfw_mining_density.pmtiles
     gfw_logging: s3://reference-tiles/gfw_logging.pmtiles
     hydrorivers: s3://reference-tiles/hydrorivers.pmtiles
     mrds: s3://reference-tiles/mrds.pmtiles
+    osm_roads: s3://reference-tiles/osm_roads.pmtiles
+    gadm: s3://reference-tiles/gadm.pmtiles
+    population: s3://reference-tiles/population.pmtiles
+    population_density: s3://reference-tiles/population_density.pmtiles
+    species: s3://reference-tiles/species.pmtiles
+    species_density: s3://reference-tiles/species_density.pmtiles

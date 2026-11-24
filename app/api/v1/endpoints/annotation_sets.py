@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 
 from fastapi.responses import Response
-from app.services.tile_proxy import cached_forward_tile
+from app.services.tile_proxy import cached_forward_tile, gzip_if_accepted
 
 from pydantic import BaseModel, Field
 from sqlalchemy import delete as sa_delete, func, select, text
@@ -329,7 +329,7 @@ async def get_annotation_set_tile(
         content_type="application/x-protobuf",
     )
     response.headers["Cache-Control"] = "private, no-store"
-    return response
+    return gzip_if_accepted(request, response)
 
 
 @router.post("", response_model=AnnotationSetRead, status_code=status.HTTP_201_CREATED)

@@ -1,7 +1,8 @@
+import gzip
 import logging
 
 import httpx
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.responses import Response
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -95,4 +96,25 @@ async def cached_forward_tile(
             await cache.set(key, response.body if response.status_code == 200 else b"")
         except (RedisError, OSError) as exc:
             logger.warning("Tile cache write failed: %s", exc)
+    return response
+
+
+def gzip_if_accepted(request: Request, response: Response) -> Response:
+    """Gzip a vector tile on the way out when the client accepts it.
+
+    Martin gzips its tiles, but httpx unzips them in forward_tile(), so without
+    this the browser gets raw MVT (3 to 5 times larger). Raster tiles are already
+    compressed images and should not go through here.
+    """
+    if (
+        response.status_code != 200
+        or len(response.body) < 1024
+        or "gzip" not in request.headers.get("accept-encoding", "")
+    ):
+        return response
+    body = gzip.compress(response.body, compresslevel=5)
+    response.body = body
+    response.headers["content-length"] = str(len(body))
+    response.headers["content-encoding"] = "gzip"
+    response.headers["vary"] = "Accept-Encoding"
     return response

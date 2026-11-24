@@ -47,6 +47,9 @@ REFERENCE_LAYERS: tuple[str, ...] = (
     "hydrorivers",
     "mrds",
     "osm_roads",
+    "gadm",
+    "population",
+    "species",
 )
 
 # Static tilesets only change when rebuilt, and the rebuild is deployed together
@@ -101,6 +104,8 @@ async def list_reference_layers(request: Request) -> dict:
                 "tile_url": f"/api/v1/reference-layers/{name}/tiles/{{z}}/{{x}}/{{y}}.pbf",
                 "geometry": meta.get("geometry"),
                 "attributes": meta.get("attributes", []),
+                "default_weight": meta.get("default_weight"),
+                "count_max": meta.get("count_max"),
                 "density_tile_url": (
                     f"/api/v1/reference-layers/{density}/tiles/{{z}}/{{x}}/{{y}}.pbf" if has_density else None
                 ),
@@ -136,7 +141,7 @@ async def set_layer_style(
         check_style_for_layer(name, style)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    stored = style.model_dump(exclude_none=True)
+    stored = style.model_dump(exclude_unset=True)
     await db.execute(
         text(
             "INSERT INTO reference_layer_styles (organization_id, layer, style, updated_by) "

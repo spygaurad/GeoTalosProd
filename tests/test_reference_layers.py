@@ -94,6 +94,8 @@ def test_list_reference_layers(client, martin):
                 "tile_url": "/api/v1/reference-layers/ramsar/tiles/{z}/{x}/{y}.pbf",
                 "geometry": "polygon",
                 "attributes": LAYER_META["ramsar"]["attributes"],
+                "default_weight": None,
+                "count_max": None,
                 "density_tile_url": None,
             }
         ]
@@ -207,3 +209,13 @@ def test_get_styles_returns_org_overrides(client):
 
 def test_delete_style_resets(client):
     assert client.delete("/api/v1/reference-layers/raisg_mining/style").status_code == 204
+
+
+def test_style_keeps_an_explicit_count_weight():
+    """null weight means "count features" and must survive, so a layer's default_weight
+    does not come back after the user picked counting."""
+    from app.services.reference_layer_meta import LayerStyle
+
+    stored = LayerStyle.model_validate({"mode": "heatmap", "heatmap": {"weight": None}}).model_dump(exclude_unset=True)
+
+    assert stored == {"mode": "heatmap", "heatmap": {"weight": None}}

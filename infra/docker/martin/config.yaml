@@ -97,3 +97,8 @@ pmtiles:
     hydrorivers: s3://reference-tiles/hydrorivers.pmtiles
     mrds: s3://reference-tiles/mrds.pmtiles
     osm_roads: s3://reference-tiles/osm_roads.pmtiles
+    gadm: s3://reference-tiles/gadm.pmtiles
+    population: s3://reference-tiles/population.pmtiles
+    population_density: s3://reference-tiles/population_density.pmtiles
+    species: s3://reference-tiles/species.pmtiles
+    species_density: s3://reference-tiles/species_density.pmtiles

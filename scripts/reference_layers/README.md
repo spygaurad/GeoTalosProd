@@ -25,6 +25,10 @@ Two ways to serve a layer:
 | `hydrorivers` | HydroRIVERS (South America) | PMTiles | [HydroSHEDS](https://www.hydrosheds.org/products/hydrorivers), [shapefile ZIP](https://data.hydrosheds.org/file/HydroRIVERS/HydroRIVERS_v10_sa_shp.zip) |
 | `mrds` | USGS mineral deposits | PMTiles | [USGS MRDS](https://www.usgs.gov/publications/mineral-resources-data-system-mrds), [mrds-trim.zip](https://mrdata.usgs.gov/mrds/mrds-trim.zip), public domain |
 | `cofopri` | Peru native communities | PMTiles | [GEOCATMIN](https://geocatmin.ingemmet.gob.pe/), [COFOPRI-MINAGRI layer](https://geocatmin.ingemmet.gob.pe/arcgis/rest/services/SERV_OTRAS_FUENTES/MapServer/45) |
+| `osm_roads` | OpenStreetMap roads | PMTiles | [Geofabrik](https://download.geofabrik.de/south-america.html) shapefile packages, nine countries, ODbL |
+| `gadm` | Administrative boundaries | PMTiles | [GADM 4.1](https://gadm.org/download_world.html) world GeoPackage (`gadm/gadm_410-gpkg.zip`), academic and non commercial use only |
+| `population`, `population_density` | Population | PMTiles | [Kontur Population](https://data.humdata.org/organization/kontur) per country, release 2023-11-01 (`kontur_population/kontur_population_<ISO2>_20231101.gpkg.gz`), CC BY 4.0 |
+| `species`, `species_density` | Threatened species records | PMTiles | [GBIF](https://www.gbif.org) occurrence search API, IUCN CR and EN since 2000, fetched by `fetch_gbif.py` into `gbif_threatened/`; each record keeps its licence |
 
 The full list with checksums and licence notes is in `SOURCES.md` and `dataset/README.md` of the
 project workspace. Check each publisher's terms before sharing the tiles. Every layer's
@@ -46,10 +50,13 @@ Martin serves it live through `reference.ramsar_mvt()`.
 
 ```bash
 SRC=/path/to/downloads WORK=/path/to/scratch \
-  scripts/reference_layers/build_pmtiles.sh              # all seven, or name some
+  scripts/reference_layers/build_pmtiles.sh              # the first seven layers, or name some
 scripts/reference_layers/upload_pmtiles.sh               # data/reference-tiles/*.pmtiles -> MinIO
 docker compose restart martin
 ```
+
+Upload every file named in `infra/docker/martin/config.yaml` before restarting Martin: if one
+of them is missing from the bucket, Martin stops at startup and no tiles are served at all.
 
 `build_pmtiles.sh` converts each source with GDAL (invalid geometry repaired, only the display
 fields kept), then tiles it with Tippecanoe 2.79 (250 KB tile cap, zoom 0 to 12, density-based
@@ -61,7 +68,7 @@ minutes each and a few GB of scratch space.
 
 1. Build it (`build_pmtiles.sh`, one more `build_<name>` function) or write a SQL function for a small one.
 2. Upload it and add it under `pmtiles: sources:` (or `functions:`) in `infra/docker/martin/config.yaml`.
-3. Add its id to `REFERENCE_LAYERS`. A layer Martin does not serve yet is skipped in the list and returns 404 for tiles.
+3. Add its id to `REFERENCE_LAYERS`. A layer whose id is listed but not served is skipped in the list and returns 404 for tiles. A source in the Martin config whose file is missing stops Martin, so add the config line only together with the file.
 
 ## Notes
 

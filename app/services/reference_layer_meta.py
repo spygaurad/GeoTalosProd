@@ -2,7 +2,7 @@
 
 ``LAYER_META`` is the descriptor the UI reads: geometry type, the attributes in the tiles
 (label, unit, kind) and which numeric attribute can weight a heatmap. A new layer needs one
-entry here and no UI change. ``density`` names the point tileset (one point per polygon,
+entry here and no UI change. ``default_weight`` is the heatmap weight used until a user picks one. ``density`` names the point tileset (one point per polygon,
 built by scripts/reference_layers/build_pmtiles.sh) that draws the heatmap; layers without
 it only have the box style.
 """
@@ -13,8 +13,11 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 
-def _a(name: str, label: str, kind: str = "text", unit: str | None = None, weight: bool = False) -> dict:
-    return {"name": name, "label": label, "kind": kind, "unit": unit, "weight": weight}
+def _a(name: str, label: str, kind: str = "text", unit: str | None = None, weight: bool = False,
+       max: float | None = None) -> dict:
+    # max: the weight that draws at full strength (log scale). Heatmap clusters add weights up,
+    # so it is set for the sum seen zoomed out, not for one feature.
+    return {"name": name, "label": label, "kind": kind, "unit": unit, "weight": weight, "max": max}
 
 
 LAYER_META: dict[str, dict] = {
@@ -42,6 +45,19 @@ LAYER_META: dict[str, dict] = {
     "osm_roads": {"geometry": "line", "attributes": [
         _a("fclass", "Road class", "category"), _a("name", "Name"), _a("ref", "Reference"),
         _a("maxspeed", "Speed limit", "number", "km/h")]},
+    "gadm": {"geometry": "line", "attributes": [
+        _a("country", "Country", "category"), _a("name_1", "State or department"),
+        _a("name_2", "Province or municipality"), _a("type", "Type", "category"), _a("level", "Level", "number")]},
+    # Counting hexagons only shows where anyone lives, so the heatmap weights by people unless
+    # the user picks otherwise.
+    "population": {"geometry": "polygon", "density": "population_density", "default_weight": "population", "attributes": [
+        _a("population", "Population", "number", "people", weight=True, max=20_000)]},
+    # count_max: records per heatmap cluster that draw at full strength (the default suits the
+    # mining layers; tens of thousands of species records need a higher one).
+    "species": {"geometry": "point", "density": "species_density", "count_max": 500, "attributes": [
+        _a("species", "Species"), _a("family", "Family", "category"), _a("class", "Class", "category"),
+        _a("category", "IUCN category", "category"), _a("year", "Year", "number"),
+        _a("basisOfRecord", "Record type", "category"), _a("license", "Licence", "category")]},
     "mrds": {"geometry": "point", "attributes": [
         _a("SITE_NAME", "Site"), _a("DEV_STAT", "Development status", "category"), _a("CODE_LIST", "Commodities")]},
 }

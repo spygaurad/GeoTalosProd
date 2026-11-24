@@ -7,7 +7,10 @@
 #
 # Layers: cofopri raisg_protected_areas mrds gfw_logging hydrorivers raisg_mining gfw_mining
 # Also: osm_roads (needs SRC/osm_roads/<country>-latest-free.shp.zip, Geofabrik shapefiles)
+# Also: gadm (SRC/gadm/gadm_410-gpkg.zip), population (SRC/kontur_population/*.gpkg.gz),
+# species (SRC/gbif_threatened/*.geojsonl, from fetch_gbif.py)
 # Heatmap point tilesets (build after their polygon layer): raisg_mining_density gfw_mining_density
+# population_density
 # (Ramsar is small and lives in PostGIS: see load_ramsar.sh.) Source links: README.md.
 # SRC is laid out like the publishers' zips: usgs_mrds/, hydrorivers/, gfw_logging/,
 # gfw_mining/, raisg/{protected_areas,mining}/, indigenous_registries/peru/cofopri_minagri/.
@@ -118,6 +121,57 @@ build_osm_roads() {
     -j '{"*":["any",["in","fclass","motorway","motorway_link","trunk","trunk_link","primary","primary_link"],["all",[">=","$zoom",6],["in","fclass","secondary","secondary_link"]],["all",[">=","$zoom",8],["in","fclass","tertiary","tertiary_link"]],["all",[">=","$zoom",9],["==","fclass","unclassified"]],["all",[">=","$zoom",10],["==","fclass","track"]]]}'
 }
 
+AMAZON_ISO3="'BOL','BRA','COL','ECU','GUY','GUF','PER','SUR','VEN'"
+
+build_gadm() {
+  # GADM 4.1 is one world layer at the finest level. Dissolve it to states (level 1) and
+  # provinces or municipalities (level 2) for the nine Amazon countries, kept as boundary lines:
+  # an outline drawn from polygons also strokes the edges where each tile clips them. Unzipped
+  # into WORK first: reading a 2.7 GB GeoPackage through /vsizip is very slow.
+  if [[ -z ${TILE_ONLY:-} ]]; then
+    [[ -f $WORK/gadm_410.gpkg ]] || unzip -o -q "$SRC/gadm/gadm_410-gpkg.zip" -d "$WORK"
+    local lvl
+    for lvl in 1 2; do
+      run $GDAL ogr2ogr -f GeoJSONSeq "/work/gadm/level$lvl.geojsonl" /work/gadm_410.gpkg -dialect SQLite \
+        -sql "SELECT $lvl AS level, GID_0 AS country, NAME_1 AS name_1, $( ((lvl == 2)) && echo "NAME_2 AS name_2, ENGTYPE_2 AS type," || echo "ENGTYPE_1 AS type," ) ST_Boundary(ST_Union(geom)) AS geometry FROM gadm_410 WHERE GID_0 IN ($AMAZON_ISO3) GROUP BY GID_$lvl" \
+        -nln gadm -nlt MULTILINESTRING -lco COORDINATE_PRECISION=6
+    done
+  fi
+  # States from zoom 0, the level 2 units from zoom 6 (Brazil alone has 5,570 municipalities).
+  tile gadm "Administrative boundaries (GADM)" "States and provinces or municipalities, nine Amazon countries, GADM 4.1" \
+    '<a href="https://gadm.org">GADM 4.1</a> (free for academic and other non commercial use)' 12 \
+    -j '{"*":["any",["==","level",1],[">=","$zoom",6]]}'
+}
+
+build_population() {
+  # Kontur Population (2023-11-01): people per 400 m H3 hexagon, one GeoPackage per country.
+  # The hexagons show from zoom 10; below that the population_density heatmap draws them.
+  local c
+  if [[ -z ${TILE_ONLY:-} ]]; then
+    for c in BO BR CO EC GF GY PE SR VE; do
+      run $GDAL ogr2ogr -f GeoJSONSeq "/work/population/$c.geojsonl" \
+        "/vsigzip//data/kontur_population/kontur_population_${c}_20231101.gpkg.gz" population \
+        -t_srs EPSG:4326 -select population -nln population -lco COORDINATE_PRECISION=6
+    done
+  fi
+  tile population "Population (Kontur, 400 m)" "People per 400 m hexagon, 2023" \
+    "<a href=\"https://www.kontur.io/portfolio/population-dataset/\">Kontur Population</a> $CC" 12 -Z10 -M 120000 --drop-densest-as-needed
+}
+
+build_species() {
+  # GBIF occurrences of critically endangered and endangered species since 2000, fetched by
+  # fetch_gbif.py into SRC/gbif_threatened/. Records carry their own licence (CC0, CC BY or
+  # CC BY-NC); the licence of each record is kept in the tiles.
+  local f
+  if [[ -z ${TILE_ONLY:-} ]]; then
+    for f in "$SRC"/gbif_threatened/*.geojsonl; do f=${f##*/}
+      convert species "$f" "/data/gbif_threatened/$f" species,family,class,category,year,basisOfRecord,license,gbif_id
+    done
+  fi
+  tile species "Threatened species records (GBIF)" "Occurrences of IUCN CR and EN species since 2000" \
+    '<a href="https://www.gbif.org">GBIF.org</a> occurrence data, IUCN Red List categories' 12 -r1 --extend-zooms-if-still-dropping
+}
+
 # density NAME SOURCE_DIR WEIGHT_SQL: one point per polygon (a point inside it), summed into clusters
 # at low zoom. The UI draws these as a heatmap instead of the dense boxes. Weight is a SQL
 # expression on the source attributes (area in hectares, or 1 to count polygons); it becomes
@@ -136,6 +190,8 @@ density() {
 }
 build_raisg_mining_density() { density raisg_mining_density raisg_mining area_sig_ha; }
 build_gfw_mining_density() { density gfw_mining_density gfw_mining 1; }
+build_population_density() { density population_density population population; }
+build_species_density() { density species_density species 1; }
 
 names=("${@:-cofopri raisg_protected_areas mrds gfw_logging hydrorivers raisg_mining gfw_mining}")
 for n in ${names[@]}; do
